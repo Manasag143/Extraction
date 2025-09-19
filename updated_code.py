@@ -300,8 +300,11 @@ Table Content:
     print(response)
     print("=" * 50)
     
-    # For now, return True to capture everything for debugging
-    return "True"
+    # Extract the IS_CONTINGENT_LIABILITY value from the response
+    if "IS_CONTINGENT_LIABILITY: True" in response:
+        return "True"
+    else:
+        return "False"
 
 def parse_page_with_docling(pdf_path, page_num):
     """
@@ -517,16 +520,16 @@ if __name__ == "__main__":
         # Choose your processing mode:
         
         # MODE 1: DEBUG - See full document structure and all tables
-        print("\n=== RUNNING DEBUG MODE ===")
-        debug_table_with_context(OUTPUT_PDF_PATH)
+        # print("\n=== RUNNING DEBUG MODE ===")
+        # debug_table_with_context(OUTPUT_PDF_PATH)
         
         # MODE 2: DEBUG TABLE CLASSIFICATION - See how each table is classified
         print("\n=== RUNNING DEBUG TABLE CLASSIFICATION ===")
         create_table_debug(OUTPUT_PDF_PATH)
         
         # MODE 3: PRODUCTION - Context-aware classification (uncomment to use)
-        # print("\n=== RUNNING PRODUCTION MODE ===")
-        # create_table_with_context(OUTPUT_PDF_PATH)
+        print("\n=== RUNNING PRODUCTION MODE ===")
+        create_table_with_context(OUTPUT_PDF_PATH)
         
         print("Processing completed!")
     else:
