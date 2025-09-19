@@ -104,6 +104,7 @@ def parse_llama_json_response(response_text):
             except json.JSONDecodeError:
                 pass
         
+        print(f"Warning: Could not parse JSON from response: {response_text}")
         return {"relevance": "Non Relevant", "confidence": 0.0}
 
 def stage_1_classify(page_text):
@@ -121,6 +122,31 @@ Return ONLY valid JSON in this exact format:
 {{
   "relevance": "Relevant" or "Non Relevant",
   "confidence": 0.85
+}}
+
+Page Text:
+{page_text}
+"""
+    
+    response = llama_client(prompt)
+    return parse_llama_json_response(response)
+
+def stage_2_classify(page_text):
+    """Classify the page text using Llama model for verification."""
+    prompt = f"""
+You are verifying a page for accuracy.
+Confirm if the page contains a "Contingent Liabilities" table SPECIFICALLY (not guarantees or commitments).
+
+Requirements:
+- Must include the heading "Contingent Liabilities" or very close variation
+- Must NOT be titled "Guarantees", "Bank Guarantees", "Commitments"
+- Must have tabular format with multiple rows
+- If any requirement is missing mark as false.
+
+Return ONLY valid JSON in this exact format:
+{{
+  "relevance": "Relevant" or "Non Relevant",
+  "confidence": 0.90
 }}
 
 Page Text:
@@ -190,11 +216,11 @@ def get_docling_pipeline():
             format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
         )
         
-        settings.debug.profile_pipeline_timings = False
+        settings.debug.profile_pipeline_timings = False  # Disable debug output
         return doc_converter_global
     
     except Exception as e:
-        return None
+        print(f"Exception occurred while getting the docling pipeline: {e}")
 
 doc_converter_global = get_docling_pipeline()
 
@@ -207,15 +233,22 @@ def extract_cg(pdf_path):
     pages, pdf_document = load_pdf_pages(pdf_path)
     candidates = keyword_prefilter(pages)
 
+    print(f"[INFO] Found {len(candidates)} pages with relevant keywords.")
+
     relevant_pages = []
 
     for p in candidates:
         stage1_result = stage_1_classify(p['text'])
+        print(f"[INFO] Page {p['page_num'] + 1}: Stage 1 - {stage1_result.get('relevance', 'Unknown')}")
 
         if isinstance(stage1_result, dict) and stage1_result.get("relevance") == "Relevant":
             confidence = stage1_result.get("confidence", 0)
             if confidence >= 0.85:
-                relevant_pages.append(p['page_num'])
+                stage2_result = stage_2_classify(p['text'])
+                print(f"[INFO] Page {p['page_num'] + 1}: Stage 2 - {stage2_result.get('relevance', 'Unknown')}")
+
+                if isinstance(stage2_result, dict) and stage2_result.get("relevance") == "Relevant":
+                    relevant_pages.append(p['page_num'])
 
     if relevant_pages:
         pdf = fitz.open(pdf_path)
@@ -227,18 +260,22 @@ def extract_cg(pdf_path):
         new_pdf.close()
         pdf.close()
 
+        print(f"[INFO] Created filtered PDF with {len(relevant_pages)} relevant pages.")
         return relevant_pages
     else:
+        print("[INFO] No relevant pages found.")
         return None
 
 def create_table_production(OUTPUT_PDF_PATH):
-    """Production version - clean output with context awareness"""
+    """Production version - clean output with context awareness (no markdown printing)"""
     result = get_docling_results(OUTPUT_PDF_PATH)
     full_markdown = result.document.export_to_markdown()
     
     previous_page_num = None
     current_page_table_count = 0
     tables_saved = 0
+    
+    print(f"[INFO] Processing {len(result.document.tables)} tables from filtered PDF...")
     
     for table_ix, table in enumerate(result.document.tables):
         current_page_num = table.dict()['prov'][0]['page_no']
@@ -259,26 +296,38 @@ def create_table_production(OUTPUT_PDF_PATH):
         ]
         table_df = clean_illegal_chars(table_df)
 
+        # Get table markdown for classification but don't print it
+        table_markdown = table_df.to_markdown()
+        
         classification_result = classifyTable_with_context(
-            table_df.to_markdown(), 
+            table_markdown, 
             full_markdown
         )
+        
+        print(f"[INFO] {sheet_name}: {'✅ Contingent Liability' if 'true' in classification_result.lower() else '❌ Other Table'}")
 
         if "true" in classification_result.lower():
             table_df.to_excel(sheet_name + ".xlsx", index=False)
             tables_saved += 1
+            print(f"[SUCCESS] Saved: {sheet_name}.xlsx")
 
         previous_page_num = current_page_num
     
-    return tables_saved
+    print(f"[COMPLETE] Saved {tables_saved} contingent liability tables.")
 
 # Main execution
 if __name__ == "__main__":
+    print("Starting Enhanced PDF Processing...")
+    
     # Step 1: Extract relevant pages
     relevant_pages = extract_cg(PDF_PATH)
     
     if relevant_pages:
+        print(f"Found relevant pages: {relevant_pages}")
+        
         # Step 2: Process tables with context awareness
-        tables_saved = create_table_production(OUTPUT_PDF_PATH)
+        create_table_production(OUTPUT_PDF_PATH)
+        
+        print("Processing completed successfully!")
     else:
-        tables_saved = 0
+        print("No contingent liability tables found.")
