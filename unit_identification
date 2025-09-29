@@ -1,0 +1,143 @@
+def extract_unit_for_table(table_df, full_markdown: str) -> str:
+    """
+    Extract unit for a table using hybrid approach.
+    Returns unit name like "Crores", "Lakhs", "Millions", or "Unknown"
+    """
+    import re
+    
+    # Step 1: Check column headers (highest priority)
+    for col in table_df.columns:
+        col_str = str(col).lower()
+        if 'crore' in col_str or 'cr.' in col_str:
+            return "Crores"
+        if 'lakh' in col_str:
+            return "Lakhs"
+        if 'million' in col_str:
+            return "Millions"
+        if 'thousand' in col_str:
+            return "Thousands"
+    
+    # Step 2: Get text around table (look for patterns)
+    # Try to find first cell content in full markdown to locate table
+    if len(table_df) > 0 and len(table_df.columns) > 0:
+        first_cell = str(table_df.iloc[0, 0])[:50]
+        
+        if first_cell in full_markdown:
+            pos = full_markdown.find(first_cell)
+            # Get 500 chars before table
+            context_before = full_markdown[max(0, pos-500):pos]
+            
+            # Look for unit patterns near table
+            patterns = [
+                (r'\(.*?in.*?Rs\.?\s*Crores?\)', 'Crores'),
+                (r'\(.*?in.*?Rs\.?\s*Lakhs?\)', 'Lakhs'),
+                (r'\(.*?in.*?Rs\.?\s*Millions?\)', 'Millions'),
+                (r'Amount.*?in.*?Crores?', 'Crores'),
+                (r'Amount.*?in.*?Lakhs?', 'Lakhs'),
+                (r'Amount.*?in.*?Millions?', 'Millions'),
+            ]
+            
+            for pattern, unit in patterns:
+                if re.search(pattern, context_before, re.IGNORECASE):
+                    return unit
+    
+    # Step 3: Check page header
+    header = full_markdown[:1000]
+    if re.search(r'All.*?amount.*?in.*?Crores?', header, re.IGNORECASE):
+        return "Crores"
+    if re.search(r'All.*?amount.*?in.*?Lakhs?', header, re.IGNORECASE):
+        return "Lakhs"
+    
+    # Step 4: If still not found, ask LLM
+    prompt = f"""Extract the unit of measurement for this table.
+
+Context (first 1500 chars):
+{full_markdown[:1500]}
+
+Table:
+{table_df.head(3).to_markdown(index=False)}
+
+Return ONLY the unit: Crores, Lakhs, Millions, Thousands, or Unknown
+
+Answer:"""
+    
+    response = llama_client(prompt).strip()
+    
+    # Extract unit from response
+    response_lower = response.lower()
+    if 'crore' in response_lower:
+        return "Crores"
+    if 'lakh' in response_lower:
+        return "Lakhs"
+    if 'million' in response_lower:
+        return "Millions"
+    if 'thousand' in response_lower:
+        return "Thousands"
+    
+    return "Unknown"
+
+
+def create_table_with_context(OUTPUT_PDF_PATH):
+    """
+    Extract tables with classification and unit detection.
+    Saves to folder: {pdf_name}_tables/
+    """
+    import os
+    
+    # Create output folder based on PDF name
+    pdf_name = os.path.splitext(os.path.basename(OUTPUT_PDF_PATH))[0]
+    output_folder = f"{pdf_name}_tables"
+    os.makedirs(output_folder, exist_ok=True)
+    
+    result = get_docling_results(OUTPUT_PDF_PATH)
+    full_markdown = result.document.export_to_markdown()
+    
+    previous_page_num = None
+    current_page_table_count = 0
+    saved_count = 0
+    
+    for table_ix, table in enumerate(result.document.tables):
+        current_page_num = table.dict()['prov'][0]['page_no']
+        
+        if previous_page_num is None:
+            previous_page_num = current_page_num
+        
+        if previous_page_num == current_page_num:
+            current_page_table_count += 1
+        else:
+            current_page_table_count = 1
+        
+        sheet_name = f"Page_{current_page_num}_table_{current_page_table_count}"
+        
+        # Extract and clean table
+        table_df: pd.DataFrame = table.export_to_dataframe()
+        table_df.columns = [ILLEGAL_CHARACTERS_RE.sub("", str(col)) for col in table_df.columns]
+        table_df = clean_illegal_chars(table_df)
+        
+        # Classify table
+        classification_result = classifyTable_with_context_check(
+            table_df.to_markdown(), 
+            table_ix, 
+            full_markdown
+        )
+        
+        print(f"Table {sheet_name}: {classification_result}")
+        
+        if "true" in classification_result.lower():
+            # Extract unit
+            unit = extract_unit_for_table(table_df, full_markdown)
+            print(f"  Unit: {unit}")
+            
+            # Save to folder with unit in filename
+            filename = f"{sheet_name}_{unit}.xlsx"
+            filepath = os.path.join(output_folder, filename)
+            table_df.to_excel(filepath, index=False)
+            
+            print(f"  ✓ Saved: {filepath}")
+            saved_count += 1
+        
+        previous_page_num = current_page_num
+    
+    print(f"\n{'='*70}")
+    print(f"✓ Saved {saved_count} tables to folder: {output_folder}/")
+    print(f"{'='*70}\n")
