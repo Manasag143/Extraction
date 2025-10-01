@@ -208,9 +208,17 @@ Output: True or False
 
 
 def clean_illegal_chars(df):
-    return df.applymap(
-        lambda x: ILLEGAL_CHARACTERS_RE.sub("", str(x)) if isinstance(x, str) else x
-    )
+    """
+    Fixed version - handles duplicate columns and uses map instead of applymap
+    """
+    # Make columns unique first
+    df.columns = pd.io.parsers.base_parser.ParserBase({'names': df.columns})._maybe_dedup_names(df.columns)
+    
+    # Use map instead of deprecated applymap
+    for col in df.columns:
+        df[col] = df[col].map(lambda x: ILLEGAL_CHARACTERS_RE.sub("", str(x)) if isinstance(x, str) else x)
+    
+    return df
 
 def get_docling_pipeline():
     """
@@ -524,7 +532,17 @@ def create_table_with_context(OUTPUT_PDF_PATH):
         sheet_name = f"Page_no_{current_page_num}_table_{current_page_table_count}"
 
         table_df: pd.DataFrame = table.export_to_dataframe()
+        
+        # Clean column names first
         table_df.columns = [ILLEGAL_CHARACTERS_RE.sub("", str(col)) for col in table_df.columns]
+        
+        # Make columns unique before cleaning
+        cols = pd.Series(table_df.columns)
+        for dup in cols[cols.duplicated()].unique():
+            cols[cols == dup] = [f"{dup}_{i}" if i != 0 else dup for i in range(sum(cols == dup))]
+        table_df.columns = cols
+        
+        # Now clean illegal characters
         table_df = clean_illegal_chars(table_df)
         
         all_tables.append({
@@ -568,7 +586,7 @@ def create_table_with_context(OUTPUT_PDF_PATH):
             if page_diff <= 1 and column_similarity > 0.7:
                 print(f"[INFO] Merging {current['sheet_name']} with {next_table['sheet_name']}")
                 
-                # Merge the dataframes
+                # Merge the dataframes - reset index to avoid duplicate index issues
                 merged_df = pd.concat([current['df'], next_table['df']], ignore_index=True)
                 
                 merged_tables.append({
@@ -628,11 +646,12 @@ if __name__ == "__main__":
         print("[INFO] Normal single-page layout detected.")
         processing_pdf = PDF_PATH
     
-    # Step 1: Extract relevant pages from split PDF
+    # Step 1: Extract relevant pages from split PDF (if split) or original PDF
     relevant_pages = extract_cg(processing_pdf)
     
     if relevant_pages:
         print("\n=== RUNNING PRODUCTION MODE ===")
+        # Use OUTPUT_PDF_PATH which was created from the processing_pdf (split or original)
         create_table_with_context(OUTPUT_PDF_PATH)
         
         print("Processing completed!")
