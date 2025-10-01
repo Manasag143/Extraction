@@ -209,15 +209,10 @@ Output: True or False
 
 def clean_illegal_chars(df):
     """
-    Fixed version - handles duplicate columns and uses map instead of applymap
+    Simplified version - clean illegal characters from dataframe
     """
-    # Make columns unique first
-    df.columns = pd.io.parsers.base_parser.ParserBase({'names': df.columns})._maybe_dedup_names(df.columns)
-    
-    # Use map instead of deprecated applymap
     for col in df.columns:
-        df[col] = df[col].map(lambda x: ILLEGAL_CHARACTERS_RE.sub("", str(x)) if isinstance(x, str) else x)
-    
+        df[col] = df[col].apply(lambda x: ILLEGAL_CHARACTERS_RE.sub("", str(x)) if isinstance(x, str) else x)
     return df
 
 def get_docling_pipeline():
@@ -536,13 +531,18 @@ def create_table_with_context(OUTPUT_PDF_PATH):
         # Clean column names first
         table_df.columns = [ILLEGAL_CHARACTERS_RE.sub("", str(col)) for col in table_df.columns]
         
-        # Make columns unique before cleaning
-        cols = pd.Series(table_df.columns)
-        for dup in cols[cols.duplicated()].unique():
-            cols[cols == dup] = [f"{dup}_{i}" if i != 0 else dup for i in range(sum(cols == dup))]
+        # Make columns unique by adding suffixes to duplicates
+        cols = list(table_df.columns)
+        seen = {}
+        for i, col in enumerate(cols):
+            if col in seen:
+                seen[col] += 1
+                cols[i] = f"{col}_{seen[col]}"
+            else:
+                seen[col] = 0
         table_df.columns = cols
         
-        # Now clean illegal characters
+        # Now clean illegal characters from cell values
         table_df = clean_illegal_chars(table_df)
         
         all_tables.append({
