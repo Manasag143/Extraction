@@ -576,3 +576,34 @@ if __name__ == "__main__":
         print("="*60)
     else:
         print("No contingent liability tables found.")
+
+
+
+
+def calculate_column_similarity(cols1, cols2):
+    """
+    Calculate similarity between two sets of columns.
+    Returns similarity score between 0 and 1.
+    """
+    if cols1 is None or cols2 is None:
+        return 0.0
+    
+    # Convert to list first to avoid pandas Index comparison issues
+    if hasattr(cols1, 'tolist'):
+        cols1 = cols1.tolist()
+    if hasattr(cols2, 'tolist'):
+        cols2 = cols2.tolist()
+    
+    # Check if empty
+    if len(cols1) == 0 or len(cols2) == 0:
+        return 0.0
+    
+    # Normalize column names
+    norm_cols1 = set([str(col).strip().lower() for col in cols1])
+    norm_cols2 = set([str(col).strip().lower() for col in cols2])
+    
+    # Calculate Jaccard similarity
+    intersection = len(norm_cols1.intersection(norm_cols2))
+    union = len(norm_cols1.union(norm_cols2))
+    
+    return intersection / union if union > 0 else 0.0
