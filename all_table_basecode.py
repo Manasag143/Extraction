@@ -50,7 +50,7 @@ class HostedLLM(LLM):
                 "input_text": prompt_template, 
                 "params": {"temperature": 0.1}
             })
-            headers = {'token': 'd2', 'Content-Type': 'application/json'}
+            headers = {'token': 'vg', 'Content-Type': 'application/json'}
             response = requests.request("POST", url=self.endpoint, 
                                       headers=headers, data=payload, verify=False)
             response_v = ast.literal_eval(response.text)
@@ -63,8 +63,8 @@ class HostedLLM(LLM):
 # Initialize Llama LLM
 llama_client = HostedLLM(endpoint="https://llmgateway.crisil.local/api/v1/llm")
 
-PDF_PATH = r"test_pdf\\indus towers AR.pdf"
-OUTPUT_PDF_PATH = r"indus_towers_AR_new.pdf"
+PDF_PATH = r"indus towers AR.pdf"
+OUTPUT_PDF_PATH = r"indus towers AR_new.pdf"
 
 def load_pdf_pages(pdf_path):
     """
@@ -157,56 +157,6 @@ Page Text:
     response = llama_client(prompt)
     return parse_llama_json_response(response)
 
-def debug_table_with_context(OUTPUT_PDF_PATH):
-    """
-    Debug function to understand table context and hierarchy
-    """
-    result = get_docling_results(OUTPUT_PDF_PATH)
-    
-    # First, let's see the full document structure
-    print("=== FULL DOCUMENT MARKDOWN ===")
-    full_markdown = result.document.export_to_markdown()
-    print(full_markdown)
-    print("=== END FULL DOCUMENT ===\n")
-    
-    # Now let's examine each table individually
-    print(f"Total tables found: {len(result.document.tables)}")
-    
-    for table_ix, table in enumerate(result.document.tables):
-        print(f"\n=== TABLE {table_ix + 1} ANALYSIS ===")
-        
-        # Get table metadata
-        table_dict = table.dict()
-        print(f"Table position info: {table_dict.get('prov', 'No position info')}")
-        
-        # Get the table as DataFrame and markdown
-        table_df: pd.DataFrame = table.export_to_dataframe()
-        markdown_content = table_df.to_markdown()
-        
-        print(f"Table shape: {table_df.shape}")
-        print(f"Table columns: {list(table_df.columns)}")
-        print("\nTable content (markdown):")
-        print(markdown_content)
-        
-        # Try to understand what's around this table in the full document
-        print(f"\n--- CONTEXT ANALYSIS ---")
-        
-        # Look for this table's content in the full document to see its context
-        if len(table_df) > 0:
-            # Take the first cell content to search for context
-            first_cell = str(table_df.iloc[0, 0]) if not table_df.empty else ""
-            if first_cell and first_cell in full_markdown:
-                # Find the position and show surrounding context
-                pos = full_markdown.find(first_cell)
-                if pos > 0:
-                    context_start = max(0, pos - 500)  # 500 chars before
-                    context_end = min(len(full_markdown), pos + 500)  # 500 chars after
-                    context = full_markdown[context_start:context_end]
-                    print("Surrounding context:")
-                    print(context)
-        
-        print("=== END TABLE ANALYSIS ===\n")
-
 def classifyTable_with_context_check(table_markdown: str = "", table_index: int = 0, full_document_markdown: str = ""):
     """
     Enhanced classification that considers document context
@@ -251,98 +201,6 @@ Output: True or False
     
     response = llama_client(prompt)
     return response.strip()
-
-def classifyTable_debug(table_markdown: str = ""):
-    """
-    Debug version to see what tables we're actually getting
-    """
-    print(f"\n=== DEBUGGING TABLE ===")
-    print(f"Table content preview (first 500 chars):")
-    print(table_markdown[:500])
-    print(f"=== END TABLE PREVIEW ===\n")
-    
-    prompt = f"""
-You are analyzing a financial table from an annual report.
-
-Task: Analyze this table and provide detailed information about it.
-
-Please analyze:
-1. What is the exact title/heading of this table?
-2. What type of financial information does it contain?
-3. Does it relate to contingent liabilities (uncertain future obligations like legal cases, tax disputes, etc.)?
-4. Or does it relate to guarantees/commitments (performance guarantees, bank guarantees given by company)?
-
-Respond in this format:
-TITLE: [exact table title/heading]
-TYPE: [what kind of financial data]
-CONTENT: [brief description of what's in the table]
-IS_CONTINGENT_LIABILITY: True/False
-REASON: [why you classified it this way]
-
-Table Content:
-{table_markdown}
-"""
-    
-    response = llama_client(prompt)
-    print(f"LLM Analysis Result:")
-    print(response)
-    print("=" * 50)
-    
-    # Extract the IS_CONTINGENT_LIABILITY value from the response
-    if "IS_CONTINGENT_LIABILITY: True" in response:
-        return "True"
-    else:
-        return "False"
-
-def parse_page_with_docling(pdf_path, page_num):
-    """
-    Parse a specific page of the PDF using Docling.
-    """
-    converter = DocumentConverter()
-    result = converter.convert(pdf_path, page_range=(page_num, page_num + 1))
-    return result.document.export_to_markdown()
-
-def extract_table_from_docling_markdown(markdown_text):
-    """
-    Extract the Contingent Liabilities table from the Docling markdown text using Llama.
-    """
-    prompt = f"""
-You are a financial data extraction expert.
-You are given a markdown version of a PDF page with clearly formatted tables.
-
-Your task:
-- Identify the table titled "Contingent Liabilities" or close variations.
-- Extract ONLY that table into a structured JSON array where each row is a dictionary.
-- Ignore all other tables.
-
-Return ONLY valid JSON in this format:
-[
-    {{ "Column1": "Value1", "Column2": "Value2" }},
-    {{ "Column1": "Value3", "Column2": "Value4" }}
-]
-
-If no contingent Liabilities table is found, return: []
-
-Markdown:
-{markdown_text}
-"""
-    
-    response = llama_client(prompt)
-    try:
-        # Try to parse the response as JSON
-        result = json.loads(response)
-        return result
-    except json.JSONDecodeError:
-        # Try to extract JSON array from response
-        json_match = re.search(r'\[.*\]', response, re.DOTALL)
-        if json_match:
-            try:
-                return json.loads(json_match.group())
-            except json.JSONDecodeError:
-                pass
-        
-        print(f"Error parsing JSON from Llama response: {response}")
-        return []
 
 def clean_illegal_chars(df):
     return df.applymap(
@@ -415,93 +273,156 @@ def extract_cg(pdf_path):
         print("No relevant pages found.")
         return None
 
-def extract_unit_for_table(table_df, full_markdown: str) -> str:
+def calculate_column_similarity(cols1, cols2):
     """
-    Extract unit for a table using hybrid approach.
-    Returns unit name like "Crores", "Lakhs", "Millions", or "Unknown"
+    Calculate similarity between two sets of columns.
+    Returns similarity score between 0 and 1.
     """
+    if not cols1 or not cols2:
+        return 0.0
     
-    # Step 1: Check column headers (highest priority)
-    for col in table_df.columns:
-        col_str = str(col).lower()
-        if 'crore' in col_str or 'cr.' in col_str:
-            return "Crores"
-        if 'lakh' in col_str:
-            return "Lakhs"
-        if 'million' in col_str:
-            return "Millions"
-        if 'thousand' in col_str:
-            return "Thousands"
+    # Normalize column names
+    norm_cols1 = set([str(col).strip().lower() for col in cols1])
+    norm_cols2 = set([str(col).strip().lower() for col in cols2])
     
-    # Step 2: Get text around table (look for patterns)
-    # Try to find first cell content in full markdown to locate table
-    if len(table_df) > 0 and len(table_df.columns) > 0:
-        first_cell = str(table_df.iloc[0, 0])[:50]
+    # Calculate Jaccard similarity
+    intersection = len(norm_cols1.intersection(norm_cols2))
+    union = len(norm_cols1.union(norm_cols2))
+    
+    return intersection / union if union > 0 else 0.0
+
+def should_merge_tables(table1_info, table2_info):
+    """
+    Determine if two tables should be merged based on multiple criteria.
+    
+    Criteria:
+    1. Page proximity (same page or consecutive pages)
+    2. Column structure similarity (>= 70%)
+    """
+    # Check 1: Page proximity
+    page_diff = table2_info['page_num'] - table1_info['page_num']
+    if page_diff > 1:  # Not on same or consecutive pages
+        return False
+    
+    # Check 2: Column similarity
+    similarity = calculate_column_similarity(
+        table1_info['df'].columns,
+        table2_info['df'].columns
+    )
+    
+    if similarity < 0.7:  # Less than 70% similar
+        return False
+    
+    return True
+
+def merge_tables(contingent_tables):
+    """
+    Identify and merge related tables.
+    Returns list of merge groups.
+    """
+    if not contingent_tables:
+        return []
+    
+    print("\n" + "="*60)
+    print("ANALYZING TABLES FOR MERGING")
+    print("="*60)
+    
+    merged_indices = set()
+    merge_groups = []
+    
+    i = 0
+    while i < len(contingent_tables):
+        if i in merged_indices:
+            i += 1
+            continue
         
-        if first_cell in full_markdown:
-            pos = full_markdown.find(first_cell)
-            # Get 500 chars before table
-            context_before = full_markdown[max(0, pos-500):pos]
+        current_group = [i]
+        j = i + 1
+        
+        # Try to merge with subsequent tables
+        while j < len(contingent_tables):
+            if j in merged_indices:
+                j += 1
+                continue
             
-            # Look for unit patterns near table
-            patterns = [
-                (r'\(.*?in.*?Rs\.?\s*Crores?\)', 'Crores'),
-                (r'\(.*?in.*?Rs\.?\s*Lakhs?\)', 'Lakhs'),
-                (r'\(.*?in.*?Rs\.?\s*Millions?\)', 'Millions'),
-                (r'Amount.*?in.*?Crores?', 'Crores'),
-                (r'Amount.*?in.*?Lakhs?', 'Lakhs'),
-                (r'Amount.*?in.*?Millions?', 'Millions'),
-            ]
+            # Check if current group's last table can merge with table j
+            last_in_group = current_group[-1]
             
-            for pattern, unit in patterns:
-                if re.search(pattern, context_before, re.IGNORECASE):
-                    return unit
+            if should_merge_tables(contingent_tables[last_in_group], contingent_tables[j]):
+                current_group.append(j)
+                merged_indices.add(j)
+                print(f"  ✓ Table on page {contingent_tables[j]['page_num']} will merge with page {contingent_tables[last_in_group]['page_num']}")
+            
+            j += 1
+        
+        if len(current_group) > 1:
+            merge_groups.append(current_group)
+            for idx in current_group:
+                merged_indices.add(idx)
+        
+        i += 1
     
-    # Step 3: Check page header
-    header = full_markdown[:1000]
-    if re.search(r'All.*?amount.*?in.*?Crores?', header, re.IGNORECASE):
-        return "Crores"
-    if re.search(r'All.*?amount.*?in.*?Lakhs?', header, re.IGNORECASE):
-        return "Lakhs"
-    
-    # Step 4: If still not found, ask LLM
-    prompt = f"""Extract the unit of measurement for this table.
+    return merge_groups
 
-Context (first 1500 chars):
-{full_markdown[:1500]}
-
-Table:
-{table_df.head(3).to_markdown(index=False)}
-
-Return ONLY the unit: Crores, Lakhs, Millions, Thousands, or Unknown
-
-Answer:"""
+def save_merged_tables(merge_groups, contingent_tables):
+    """
+    Create and save merged Excel files.
+    """
+    if not merge_groups:
+        print("\n✓ No tables need to be merged (all tables are independent)")
+        return
     
-    response = llama_client(prompt).strip()
+    print(f"\n✓ Found {len(merge_groups)} group(s) of tables to merge")
+    print("\n" + "="*60)
+    print("CREATING MERGED FILES")
+    print("="*60)
     
-    # Extract unit from response
-    response_lower = response.lower()
-    if 'crore' in response_lower:
-        return "Crores"
-    if 'lakh' in response_lower:
-        return "Lakhs"
-    if 'million' in response_lower:
-        return "Millions"
-    if 'thousand' in response_lower:
-        return "Thousands"
-    
-    return "Unknown"
+    for group_idx, group in enumerate(merge_groups):
+        print(f"\nMerging Group {group_idx + 1}:")
+        
+        # Collect dataframes to merge
+        dfs_to_merge = []
+        page_nums = []
+        sheet_names = []
+        
+        for table_idx in group:
+            table_info = contingent_tables[table_idx]
+            dfs_to_merge.append(table_info['df'])
+            page_nums.append(table_info['page_num'])
+            sheet_names.append(table_info['sheet_name'])
+            print(f"  - {table_info['sheet_name']}: {len(table_info['df'])} rows")
+        
+        # Merge dataframes
+        merged_df = pd.concat(dfs_to_merge, ignore_index=True)
+        
+        # Create filename
+        first_page = min(page_nums)
+        last_page = max(page_nums)
+        
+        if first_page == last_page:
+            filename = f"MERGED_Page_{first_page}_({len(group)}_tables).xlsx"
+        else:
+            filename = f"MERGED_Pages_{first_page}_to_{last_page}.xlsx"
+        
+        merged_df.to_excel(filename, index=False)
+        
+        print(f"  ✓ Saved: {filename}")
+        print(f"    Total rows: {len(merged_df)}")
 
 def create_table_with_context(OUTPUT_PDF_PATH):
     """
-    Create tables with context awareness
+    STEP 1: Extract and save all individual tables
+    STEP 2: Analyze and create merged tables
     """
-    pdf_name=os.path.splitext(os.path.basename(OUTPUT_PDF_PATH))[0]
-    output_folder= f"{pdf_name}_tables"
-    os.makedirs(output_folder, exist_ok=True)
-
     result = get_docling_results(OUTPUT_PDF_PATH)
     full_markdown = result.document.export_to_markdown()
+    
+    print("\n" + "="*60)
+    print("STEP 1: EXTRACTING AND SAVING INDIVIDUAL TABLES")
+    print("="*60)
+    
+    # Store contingent liability tables for later merging
+    contingent_tables = []
     
     previous_page_num = None
     current_page_table_count = 0
@@ -532,21 +453,29 @@ def create_table_with_context(OUTPUT_PDF_PATH):
             full_markdown
         )
         
-        print(f"Classification result for {sheet_name}: {classification_result}")
+        print(f"\nClassification result for {sheet_name}: {classification_result}")
 
         if "true" in classification_result.lower():
-            # Extract unit
-            unit = extract_unit_for_table(table_df, full_markdown)
-            print(f"  Unit: {unit}")
-            table_df['Unit'] = unit
-            # Save to folder with unit in filename
-            filename = f"{sheet_name}_{unit}.xlsx"
-            filepath = os.path.join(output_folder, filename)
-            table_df.to_excel(filepath, index=False)
+            # Save individual table
+            filename = f"{sheet_name}.xlsx"
+            table_df.to_excel(filename, index=False)
+            print(f"✓ Saved individual table: {filename}")
             
-            print(f"  ✓ Saved: {filepath}")
+            # Store for merging analysis
+            contingent_tables.append({
+                'df': table_df,
+                'page_num': current_page_num,
+                'table_num': current_page_table_count,
+                'sheet_name': sheet_name,
+                'filename': filename
+            })
 
         previous_page_num = current_page_num
+    
+    # STEP 2: Analyze and merge tables
+    if contingent_tables:
+        merge_groups = merge_tables(contingent_tables)
+        save_merged_tables(merge_groups, contingent_tables)
 
 def create_table_debug(OUTPUT_PDF_PATH):
     """
@@ -584,6 +513,48 @@ def create_table_debug(OUTPUT_PDF_PATH):
 
         previous_page_num = current_page_num
 
+def classifyTable_debug(table_markdown: str = ""):
+    """
+    Debug version to see what tables we're actually getting
+    """
+    print(f"\n=== DEBUGGING TABLE ===")
+    print(f"Table content preview (first 500 chars):")
+    print(table_markdown[:500])
+    print(f"=== END TABLE PREVIEW ===\n")
+    
+    prompt = f"""
+You are analyzing a financial table from an annual report.
+
+Task: Analyze this table and provide detailed information about it.
+
+Please analyze:
+1. What is the exact title/heading of this table?
+2. What type of financial information does it contain?
+3. Does it relate to contingent liabilities (uncertain future obligations like legal cases, tax disputes, etc.)?
+4. Or does it relate to guarantees/commitments (performance guarantees, bank guarantees given by company)?
+
+Respond in this format:
+TITLE: [exact table title/heading]
+TYPE: [what kind of financial data]
+CONTENT: [brief description of what's in the table]
+IS_CONTINGENT_LIABILITY: True/False
+REASON: [why you classified it this way]
+
+Table Content:
+{table_markdown}
+"""
+    
+    response = llama_client(prompt)
+    print(f"LLM Analysis Result:")
+    print(response)
+    print("=" * 50)
+    
+    # Extract the IS_CONTINGENT_LIABILITY value from the response
+    if "IS_CONTINGENT_LIABILITY: True" in response:
+        return "True"
+    else:
+        return "False"
+
 # Main execution with different modes
 if __name__ == "__main__":
     print("Starting PDF processing with Enhanced Llama LLM...")
@@ -600,6 +571,8 @@ if __name__ == "__main__":
         print("\n=== RUNNING PRODUCTION MODE ===")
         create_table_with_context(OUTPUT_PDF_PATH)
         
-        print("Processing completed!")
+        print("\n" + "="*60)
+        print("✅ PROCESSING COMPLETED!")
+        print("="*60)
     else:
         print("No contingent liability tables found.")
