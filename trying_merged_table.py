@@ -288,7 +288,9 @@ def split_pdf_page_vertically(input_pdf_path, output_pdf_path):
     pdf = fitz.open(input_pdf_path)
     new_pdf = fitz.open()
     
-    for page_num in range(len(pdf)):
+    total_pages = len(pdf)
+    
+    for page_num in range(total_pages):
         page = pdf[page_num]
         rect = page.rect
         
@@ -312,8 +314,8 @@ def split_pdf_page_vertically(input_pdf_path, output_pdf_path):
     pdf.close()
     
     print(f"✓ Split PDF saved: {output_pdf_path}")
-    print(f"  Original pages: {len(pdf)}")
-    print(f"  New pages: {len(pdf) * 2}")
+    print(f"  Original pages: {total_pages}")
+    print(f"  New pages: {total_pages * 2}")
 
 def detect_split_table(df):
     """
