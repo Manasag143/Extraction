@@ -1,0 +1,97 @@
+def stage_1_classify(page_text):
+    """Classify the page text using Llama model."""
+    prompt = f"""
+You are an expert Financial Analyst. You will be given the text content of a PDF page from an annual report.
+Determine if the page contains a "Contingent Liabilities" table.
+
+Rules:
+1. ACCEPT if table title contains "Contingent Liabilities" OR "Contingent Liability"
+2. ACCEPT if title is "Contingent Liabilities and Commitments" (combined table is OK)
+3. REJECT if title is ONLY "Commitments" or ONLY "Guarantees" (without contingent liabilities)
+4. REJECT tables titled only "Bank Guarantees", "Performance Guarantees", etc.
+5. Must be an actual table, not just a reference.
+
+Return ONLY valid JSON in this exact format:
+{{
+  "relevance": "Relevant" or "Non Relevant",
+  "confidence": 0.85
+}}
+
+Page Text:
+{page_text}
+"""
+    
+    response = llama_client(prompt)
+    return parse_llama_json_response(response)
+
+def stage_2_classify(page_text):
+    """Classify the page text using Llama model for verification."""
+    prompt = f"""
+You are verifying a page for accuracy.
+Confirm if the page contains a "Contingent Liabilities" table.
+
+Requirements:
+- Must include "Contingent Liabilities" or "Contingent Liability" in the heading
+- Combined tables like "Contingent Liabilities and Commitments" are ACCEPTABLE
+- Tables with ONLY "Commitments" or ONLY "Guarantees" should be rejected
+- Must have tabular format with multiple rows
+- If any requirement is missing mark as false.
+
+Return ONLY valid JSON in this exact format:
+{{
+  "relevance": "Relevant" or "Non Relevant",
+  "confidence": 0.90
+}}
+
+Page Text:
+{page_text}
+"""
+    
+    response = llama_client(prompt)
+    return parse_llama_json_response(response)
+
+def classifyTable_with_context_check(table_markdown: str = "", table_index: int = 0, full_document_markdown: str = ""):
+    """Enhanced classification that considers document context"""
+    prompt = f"""
+You are analyzing a financial table from an annual report.
+
+CONTEXT: Here's the full document markdown to understand the table's position:
+{full_document_markdown[:3000]}
+
+TABLE TO CLASSIFY:
+{table_markdown}
+
+TASK: Determine if this specific table contains contingent liabilities information.
+
+ANALYSIS STEPS:
+1. Look at the full document context above - ACCEPT if table is under a section titled:
+   - "Contingent Liabilities" or "Contingent Liability"
+   - "Contingent Liabilities and Commitments" (combined table is OK)
+   - "Legal Proceedings"  
+   - "Litigation"
+   
+2. REJECT if the table appears under sections titled ONLY:
+   - "Guarantees" (without contingent liabilities)
+   - "Bank Guarantees" (without contingent liabilities)
+   - "Performance Guarantees" (without contingent liabilities)
+   - "Letters of Credit" (without contingent liabilities)
+   - "Commitments" (without contingent liabilities)
+
+3. Look at the table content itself:
+   - Does it contain legal disputes, court cases, tax disputes?
+   - Does it show amounts "not acknowledged as debt"?
+   - Does it list uncertain future obligations?
+
+IMPORTANT: 
+- Combined tables like "Contingent Liabilities and Commitments" should be ACCEPTED
+- Pure "Commitments" or "Guarantees" tables (without contingent liabilities) should be REJECTED
+
+Respond ONLY with 'True' or 'False':
+- True: If this table contains contingent liabilities (even if combined with commitments)
+- False: If this table is ONLY about guarantees/commitments without contingent liabilities
+
+Output: True or False
+"""
+    
+    response = llama_client(prompt)
+    return response.strip()
