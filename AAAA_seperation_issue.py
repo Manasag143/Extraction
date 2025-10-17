@@ -241,10 +241,15 @@ Your answer:"""
     response = llama_client(prompt)
     return response.strip()
 
+
 def fix_merged_columns(df):
     """
     Fix merged columns in contingent liability tables.
     Expected: Column1=Text, Column2=Number, Column3=Number
+    
+    Handles TWO types of issues:
+    1. Numbers in Column 1 (with text)
+    2. Text + Numbers mixed in Column 2 (should be separate)
     """
     if df.empty or len(df.columns) < 2:
         return df
@@ -264,7 +269,7 @@ def fix_merged_columns(df):
         col2 = str(df_fixed.iloc[i, 1]) if len(df_fixed.columns) > 1 else ''
         col3 = str(df_fixed.iloc[i, 2]) if len(df_fixed.columns) > 2 else ''
         
-        # Find numbers in column 1
+        # ===== FIX TYPE 1: Numbers in Column 1 =====
         numbers_in_col1 = re.findall(number_pattern, col1)
         numbers_in_col1 = [n for n in numbers_in_col1 if len(n.replace(',', '').replace('.', '')) >= 2]
         
@@ -281,14 +286,74 @@ def fix_merged_columns(df):
             if len(numbers_in_col1) > 1 and (not col3 or not any(c.isdigit() for c in col3)):
                 col3 = numbers_in_col1[1]
             
-            # Update dataframe
-            df_fixed.iloc[i, 0] = clean_text
-            if len(df_fixed.columns) > 1:
-                df_fixed.iloc[i, 1] = col2
-            if len(df_fixed.columns) > 2:
-                df_fixed.iloc[i, 2] = col3
-            
+            col1 = clean_text
             fixes_made += 1
+        
+        # ===== FIX TYPE 2: Text + Number mixed in Column 2 =====
+        # Check if col2 has BOTH text (letters) and numbers
+        if col2 and len(col2) > 3:  # Skip very short values
+            has_letters = any(c.isalpha() for c in col2)
+            has_digits = any(c.isdigit() for c in col2)
+            
+            if has_letters and has_digits:
+                # Extract numbers from col2
+                numbers_in_col2 = re.findall(number_pattern, col2)
+                numbers_in_col2 = [n for n in numbers_in_col2 if len(n.replace(',', '').replace('.', '')) >= 2]
+                
+                if numbers_in_col2:
+                    # Remove numbers from col2, keep only text
+                    text_part = col2
+                    for num in numbers_in_col2:
+                        text_part = text_part.replace(num, '')
+                    text_part = re.sub(r'\s+', ' ', text_part).strip()
+                    
+                    # Merge text from col2 into col1
+                    if col1.strip() and not col1.strip().endswith('.'):
+                        col1 = col1.strip() + ' ' + text_part
+                    else:
+                        col1 = col1.strip() + text_part
+                    
+                    # Move first number to col2
+                    col2 = numbers_in_col2[0]
+                    
+                    # If there's a second number and col3 is empty, move it there
+                    if len(numbers_in_col2) > 1 and (not col3 or not any(c.isdigit() for c in col3)):
+                        col3 = numbers_in_col2[1]
+                    
+                    fixes_made += 1
+        
+        # ===== FIX TYPE 3: Similar issue in Column 3 =====
+        if col3 and len(col3) > 3:
+            has_letters = any(c.isalpha() for c in col3)
+            has_digits = any(c.isdigit() for c in col3)
+            
+            if has_letters and has_digits:
+                numbers_in_col3 = re.findall(number_pattern, col3)
+                numbers_in_col3 = [n for n in numbers_in_col3 if len(n.replace(',', '').replace('.', '')) >= 2]
+                
+                if numbers_in_col3:
+                    text_part = col3
+                    for num in numbers_in_col3:
+                        text_part = text_part.replace(num, '')
+                    text_part = re.sub(r'\s+', ' ', text_part).strip()
+                    
+                    # Merge text into col1
+                    if col1.strip() and not col1.strip().endswith('.'):
+                        col1 = col1.strip() + ' ' + text_part
+                    else:
+                        col1 = col1.strip() + text_part
+                    
+                    # Keep only first number in col3
+                    col3 = numbers_in_col3[0]
+                    
+                    fixes_made += 1
+        
+        # Update dataframe with fixed values
+        df_fixed.iloc[i, 0] = col1
+        if len(df_fixed.columns) > 1:
+            df_fixed.iloc[i, 1] = col2
+        if len(df_fixed.columns) > 2:
+            df_fixed.iloc[i, 2] = col3
     
     if fixes_made > 0:
         print(f"    ✓ Fixed {fixes_made} rows with merged columns")
