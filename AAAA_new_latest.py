@@ -763,3 +763,286 @@ if __name__ == "__main__":
         print(f"\n✅ Processing completed in {total_time:.2f} seconds")
     else:
         print("\n❌ No relevant pages found")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def extract_page_number_from_content(page_text):
+    """
+    Use LLM to extract the actual page number from the page content.
+    PDFs often have page numbers in headers/footers.
+    """
+    prompt = f"""
+You are analyzing a PDF page to find its page number.
+
+TASK: Extract the page number that appears on this page (usually in header/footer).
+
+IMPORTANT:
+- Look for standalone numbers that represent page numbers (e.g., "445", "Page 445", "- 445 -")
+- Ignore reference numbers, note numbers, or numbers within text content
+- Focus on numbers that appear at the top or bottom of the page
+- If multiple candidates exist, choose the one that looks most like a page number
+- Return ONLY the number, nothing else
+
+PAGE CONTENT (first 500 and last 500 characters):
+{page_text[:500]}
+...
+{page_text[-500:]}
+
+Return ONLY the page number as an integer (e.g., 445):
+"""
+    
+    try:
+        response = llama_client(prompt).strip()
+        # Extract just the number from response
+        page_num = int(re.search(r'\d+', response).group())
+        return page_num
+    except:
+        return None
+
+def determine_statement_type_with_llm(page_text, page_ranges):
+    """
+    Enhanced version that uses LLM to extract actual page number from content
+    then matches with ranges.
+    """
+    if not page_ranges:
+        return "Unknown", None
+    
+    # Extract actual page number from the page content
+    actual_page = extract_page_number_from_content(page_text)
+    
+    if actual_page is None:
+        # Fallback: Try to get it from note references or other contextual clues
+        actual_page = extract_page_number_contextual(page_text, page_ranges)
+    
+    if actual_page is None:
+        return "Unknown", None
+    
+    cons = page_ranges.get('consolidated', {})
+    stand = page_ranges.get('standalone', {})
+    
+    # Check if page falls within ranges
+    if cons.get('start') and cons.get('end'):
+        if cons['start'] <= actual_page <= cons['end']:
+            return "Consolidated", actual_page
+    
+    if stand.get('start') and stand.get('end'):
+        if stand['start'] <= actual_page <= stand['end']:
+            return "Standalone", actual_page
+    
+    return "Unknown", actual_page
+
+def extract_page_number_contextual(page_text, page_ranges):
+    """
+    Backup method: Use LLM with context about the document structure
+    """
+    prompt = f"""
+You are analyzing a page from a financial report that contains Contingent Liabilities information.
+
+The document has these sections:
+- Standalone Financial Statements: Pages {page_ranges.get('standalone', {}).get('start', 'N/A')} to {page_ranges.get('standalone', {}).get('end', 'N/A')}
+- Consolidated Financial Statements: Pages {page_ranges.get('consolidated', {}).get('start', 'N/A')} to {page_ranges.get('consolidated', {}).get('end', 'N/A')}
+
+PAGE CONTENT:
+{page_text[:1500]}
+
+Based on:
+1. Any visible page numbers in the content
+2. Note references (e.g., "Note 41" often appears on specific page ranges)
+3. References to "consolidated" or "standalone" in headers
+4. Any other contextual clues
+
+What is the most likely page number of this page?
+
+Return ONLY the page number as an integer:
+"""
+    
+    try:
+        response = llama_client(prompt).strip()
+        page_num = int(re.search(r'\d+', response).group())
+        return page_num
+    except:
+        return None
+
+def extract_cg_enhanced(pdf_path, page_ranges=None):
+    """
+    Enhanced version of extract_cg that uses LLM to determine actual page numbers
+    """
+    pages, pdf_document = load_pdf_pages(pdf_path)
+    candidates = keyword_prefilter(pages)
+
+    relevant_pages = []
+    page_statement_map = {}
+    actual_page_numbers = {}  # Store actual PDF page numbers
+
+    for p in candidates:
+        stage1_result = stage_1_classify(p['text'])
+
+        if isinstance(stage1_result, dict) and stage1_result.get("relevance") == "Relevant":
+            confidence = stage1_result.get("confidence", 0)
+            if confidence >= 0.85:
+                stage2_result = stage_2_classify(p['text'])
+
+                if isinstance(stage2_result, dict) and stage2_result.get("relevance") == "Relevant":
+                    relevant_pages.append(p['page_num'])
+                    
+                    # Use enhanced LLM-based determination
+                    statement_type, actual_page = determine_statement_type_with_llm(
+                        p['text'], 
+                        page_ranges
+                    )
+                    
+                    page_statement_map[p['page_num']] = statement_type
+                    actual_page_numbers[p['page_num']] = actual_page
+                    
+                    print(f"Page {p['page_num']} (actual: {actual_page}): {statement_type}")
+
+    if relevant_pages:
+        pdf = fitz.open(pdf_path)
+        new_pdf = fitz.open()
+
+        for page in relevant_pages:
+            new_pdf.insert_pdf(pdf, from_page=page, to_page=page)
+        new_pdf.save(OUTPUT_PDF_PATH)
+        new_pdf.close()
+        pdf.close()
+
+        return relevant_pages, page_statement_map, actual_page_numbers
+    
+    return None, None, None
+
+def create_table_with_full_features_enhanced(OUTPUT_PDF_PATH, relevant_pages, page_statement_map, actual_page_numbers):
+    """
+    Enhanced version that uses actual page numbers for better accuracy
+    """
+    pdf_name = os.path.splitext(os.path.basename(OUTPUT_PDF_PATH))[0]
+    output_folder = f"{pdf_name}_tables"
+    os.makedirs(output_folder, exist_ok=True)
+
+    result = get_docling_results(OUTPUT_PDF_PATH)
+    full_markdown = result.document.export_to_markdown()
+    
+    extracted_to_original = {}
+    for idx, orig_page in enumerate(relevant_pages):
+        extracted_to_original[idx] = orig_page
+    
+    previous_page_num = None
+    current_page_table_count = 0
+    
+    for table_ix, table in enumerate(result.document.tables):
+        docling_page_num = table.dict()['prov'][0]['page_no']
+        current_page_num = docling_page_num - 1
+        
+        original_page_num = extracted_to_original.get(current_page_num)
+        
+        if original_page_num is not None:
+            statement_type = page_statement_map.get(original_page_num, "Unknown")
+            actual_page = actual_page_numbers.get(original_page_num, "Unknown")
+        else:
+            statement_type = "Unknown"
+            actual_page = "Unknown"
+
+        if previous_page_num is None:
+            previous_page_num = current_page_num
+
+        if previous_page_num == current_page_num:
+            current_page_table_count += 1
+        else:
+            current_page_table_count = 1
+
+        # Include actual page number in sheet name
+        sheet_name = f"ActualPage_{actual_page}_table_{current_page_table_count}"
+
+        table_df: pd.DataFrame = table.export_to_dataframe()
+        table_df.columns = [ILLEGAL_CHARACTERS_RE.sub("", str(col)) for col in table_df.columns]
+        table_df = clean_illegal_chars(table_df)
+
+        classification_result = classifyTable_with_context_check(
+            table_df.to_markdown(), 
+            table_ix, 
+            full_markdown
+        )
+
+        if "true" in classification_result.lower():
+            table_df = fix_merged_columns(table_df)
+            currency_unit = extract_currency_and_unit_for_table(table_df, full_markdown)
+            table_df = add_total_to_table(table_df, sheet_name)
+            
+            # Add metadata columns
+            table_df['Currency'] = currency_unit['currency']
+            table_df['Unit'] = currency_unit['unit']
+            table_df['Statement_Type'] = statement_type
+            table_df['Actual_Page'] = actual_page
+            
+            filename = f"Page_{actual_page}_{statement_type}_{currency_unit['currency']}_{currency_unit['unit']}.xlsx"
+            filepath = os.path.join(output_folder, filename)
+            table_df.to_excel(filepath, index=False)
+            
+            print(f"✓ Saved: {filename} (Statement: {statement_type})")
+        
+        previous_page_num = current_page_num
+
+# Update main execution
+if __name__ == "__main__":
+    start_time = time.time()
+
+    print("\n" + "="*60)
+    print("STEP 1: Extracting Contents Page")
+    print("="*60)
+    contents_pages = extract_contents_pages(PDF_PATH)
+    
+    page_ranges = None
+    if contents_pages:
+        print(f"Found {len(contents_pages)} contents page(s)")
+        page_ranges = parse_contents_with_llm(contents_pages)
+        
+        if page_ranges:
+            page_ranges = refine_page_ranges(page_ranges)
+            print("\n✅ Page ranges identified successfully")
+            print(f"  Consolidated: {page_ranges.get('consolidated')}")
+            print(f"  Standalone: {page_ranges.get('standalone')}")
+        else:
+            print("\n⚠️  Could not extract page ranges")
+    else:
+        print("\n⚠️  No contents page found")
+
+    print("\n" + "="*60)
+    print("STEP 2: Extracting Contingent Liability Pages (with LLM page detection)")
+    print("="*60)
+    relevant_pages, page_statement_map, actual_page_numbers = extract_cg_enhanced(PDF_PATH, page_ranges)
+    
+    if relevant_pages:
+        print(f"\nFound {len(relevant_pages)} relevant page(s):")
+        print("\nPage Mapping Summary:")
+        print("-" * 40)
+        for page in relevant_pages:
+            statement_type = page_statement_map.get(page, "Unknown")
+            actual_page = actual_page_numbers.get(page, "Unknown")
+            print(f"  Index {page} → Actual Page {actual_page}: {statement_type}")
+        
+        print("\n" + "="*60)
+        print("STEP 3: Processing Tables")
+        print("="*60)
+        create_table_with_full_features_enhanced(OUTPUT_PDF_PATH, relevant_pages, page_statement_map, actual_page_numbers)
+        
+        end_time = time.time()
+        total_time = end_time - start_time
+        print(f"\n✅ Processing completed in {total_time:.2f} seconds")
+    else:
+        print("\n❌ No relevant pages found")
