@@ -617,11 +617,12 @@ def determine_statement_type(page_num, page_ranges):
     
     return "Unknown"
 
-def extract_cg(pdf_path):
+def extract_cg(pdf_path, page_ranges=None):
     pages, pdf_document = load_pdf_pages(pdf_path)
     candidates = keyword_prefilter(pages)
 
     relevant_pages = []
+    page_statement_map = {}
 
     for p in candidates:
         stage1_result = stage_1_classify(p['text'])
@@ -633,6 +634,9 @@ def extract_cg(pdf_path):
 
                 if isinstance(stage2_result, dict) and stage2_result.get("relevance") == "Relevant":
                     relevant_pages.append(p['page_num'])
+                    
+                    statement_type = determine_statement_type(p['page_num'], page_ranges)
+                    page_statement_map[p['page_num']] = statement_type
 
     if relevant_pages:
         pdf = fitz.open(pdf_path)
@@ -644,11 +648,11 @@ def extract_cg(pdf_path):
         new_pdf.close()
         pdf.close()
 
-        return relevant_pages
+        return relevant_pages, page_statement_map
     
-    return None
+    return None, None
 
-def create_table_with_full_features(OUTPUT_PDF_PATH, page_ranges=None):
+def create_table_with_full_features(OUTPUT_PDF_PATH, relevant_pages, page_statement_map):
     pdf_name = os.path.splitext(os.path.basename(OUTPUT_PDF_PATH))[0]
     output_folder = f"{pdf_name}_tables"
     os.makedirs(output_folder, exist_ok=True)
@@ -662,7 +666,11 @@ def create_table_with_full_features(OUTPUT_PDF_PATH, page_ranges=None):
     for table_ix, table in enumerate(result.document.tables):
         current_page_num = table.dict()['prov'][0]['page_no']
 
-        statement_type = determine_statement_type(current_page_num, page_ranges)
+        if current_page_num < len(relevant_pages):
+            original_page_num = relevant_pages[current_page_num]
+            statement_type = page_statement_map.get(original_page_num, "Unknown")
+        else:
+            statement_type = "Unknown"
 
         if previous_page_num is None:
             previous_page_num = current_page_num
@@ -691,8 +699,6 @@ def create_table_with_full_features(OUTPUT_PDF_PATH, page_ranges=None):
             
             table_df['Currency'] = currency_unit['currency']
             table_df['Unit'] = currency_unit['unit']
-            table_df['Statement_Type'] = statement_type
-            table_df['Page_Number'] = current_page_num + 1
             
             filename = f"{sheet_name}_{statement_type}_{currency_unit['currency']}_{currency_unit['unit']}.xlsx"
             filepath = os.path.join(output_folder, filename)
@@ -718,6 +724,8 @@ if __name__ == "__main__":
         if page_ranges:
             page_ranges = refine_page_ranges(page_ranges)
             print("\n✅ Page ranges identified successfully")
+            print(f"  Consolidated: {page_ranges.get('consolidated')}")
+            print(f"  Standalone: {page_ranges.get('standalone')}")
         else:
             print("\n⚠️  Could not extract page ranges")
     else:
@@ -726,15 +734,20 @@ if __name__ == "__main__":
     print("\n" + "="*60)
     print("STEP 2: Extracting Contingent Liability Pages")
     print("="*60)
-    relevant_pages = extract_cg(PDF_PATH)
+    relevant_pages, page_statement_map = extract_cg(PDF_PATH, page_ranges)
     
     if relevant_pages:
         print(f"Found {len(relevant_pages)} relevant page(s): {relevant_pages}")
         
+        print("\nPage to Statement Type Mapping:")
+        for page in relevant_pages:
+            statement_type = page_statement_map.get(page, "Unknown")
+            print(f"  Page {page + 1}: {statement_type}")
+        
         print("\n" + "="*60)
         print("STEP 3: Processing Tables")
         print("="*60)
-        create_table_with_full_features(OUTPUT_PDF_PATH, page_ranges)
+        create_table_with_full_features(OUTPUT_PDF_PATH, relevant_pages, page_statement_map)
         
         end_time = time.time()
         total_time = end_time - start_time
