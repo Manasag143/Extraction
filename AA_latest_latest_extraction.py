@@ -60,15 +60,12 @@ class HostedLLM(LLM):
         except Exception as e:
             return f"LLM Call Failed: {e}"
 
-# Initialize Llama LLM
 llama_client = HostedLLM(endpoint="https://llmgateway.crisil.local/api/v1/llm")
 
-# Configuration
-PDF_PATH = r"test_pdf\\Tube Investments Of India Limited.pdf"
-OUTPUT_PDF_PATH = r"result\\Tube Investments Of India Limited_new.pdf"
+PDF_PATH = r"test_pdf\\LnT-AR.pdf"
+OUTPUT_PDF_PATH = r"result\\LnT-AR_new.pdf"
 
 def load_pdf_pages(pdf_path):
-    """Load a PDF file and return its content as a list of strings, each representing a page."""
     pdf_document = fitz.open(pdf_path)
     pages = []
     for page in range(len(pdf_document)):
@@ -77,12 +74,10 @@ def load_pdf_pages(pdf_path):
     return pages, pdf_document
 
 def keyword_prefilter(pages):
-    """More flexible keyword filtering for contingent liabilities"""
     pattern = re.compile(r"\bcontingent\s+liabilit(y|ies)\b", re.IGNORECASE)
     return [p for p in pages if pattern.search(p['text'])]
 
 def parse_llama_json_response(response_text):
-    """Helper function to parse JSON from Llama response, handling potential formatting issues."""
     try:
         return json.loads(response_text)
     except json.JSONDecodeError:
@@ -92,20 +87,19 @@ def parse_llama_json_response(response_text):
                 return json.loads(json_match.group())
             except json.JSONDecodeError:
                 pass
-        
-        print(f"Warning: Could not parse JSON from response: {response_text}")
         return {"relevance": "Non Relevant", "confidence": 0.0}
-
+    
 def stage_1_classify(page_text):
-    """Classify the page text using Llama model."""
     prompt = f"""
 You are an expert Financial Analyst. You will be given the text content of a PDF page from an annual report.
-Determine if the page contains a "Contingent Liabilities" table (NOT guarantees or commitments tables).
+Determine if the page contains a "Contingent Liabilities" table.
 
 Rules:
-1. The page must contain a table specifically titled "Contingent Liabilities" or close variations
-2. Ignore tables titled "Guarantees", "Bank Guarantees", "Commitments", etc.
-3. Must be an actual table, not just a reference.
+1. ACCEPT if table title contains "Contingent Liabilities" OR "Contingent Liability"
+2. ACCEPT if title is "Contingent Liabilities and Commitments" (combined table is OK)
+3. REJECT if title is ONLY "Commitments" or ONLY "Guarantees" (without contingent liabilities)
+4. REJECT tables titled only "Bank Guarantees", "Performance Guarantees", etc.
+5. Must be an actual table, not just a reference.
 
 Return ONLY valid JSON in this exact format:
 {{
@@ -116,19 +110,18 @@ Return ONLY valid JSON in this exact format:
 Page Text:
 {page_text}
 """
-    
     response = llama_client(prompt)
     return parse_llama_json_response(response)
 
 def stage_2_classify(page_text):
-    """Classify the page text using Llama model for verification."""
     prompt = f"""
 You are verifying a page for accuracy.
-Confirm if the page contains a "Contingent Liabilities" table SPECIFICALLY (not guarantees or commitments).
+Confirm if the page contains a "Contingent Liabilities" table.
 
 Requirements:
-- Must include the heading "Contingent Liabilities" or very close variation
-- Must NOT be titled "Guarantees", "Bank Guarantees", "Commitments"
+- Must include "Contingent Liabilities" or "Contingent Liability" in the heading
+- Combined tables like "Contingent Liabilities and Commitments" are ACCEPTABLE
+- Tables with ONLY "Commitments" or ONLY "Guarantees" should be rejected
 - Must have tabular format with multiple rows
 - If any requirement is missing mark as false.
 
@@ -141,12 +134,10 @@ Return ONLY valid JSON in this exact format:
 Page Text:
 {page_text}
 """
-    
     response = llama_client(prompt)
     return parse_llama_json_response(response)
 
 def classifyTable_with_context_check(table_markdown: str = "", table_index: int = 0, full_document_markdown: str = ""):
-    """Enhanced classification that considers document context"""
     prompt = f"""
 You are analyzing a financial table from an annual report.
 
@@ -156,51 +147,131 @@ CONTEXT: Here's the full document markdown to understand the table's position:
 TABLE TO CLASSIFY:
 {table_markdown}
 
-TASK: Determine if this specific table is about contingent liabilities.
+TASK: Determine if this specific table contains contingent liabilities information.
 
 ANALYSIS STEPS:
-1. Look at the full document context above - is this table under a section titled:
+1. Look at the full document context above - ACCEPT if table is under a section titled:
    - "Contingent Liabilities" or "Contingent Liability"
+   - "Contingent Liabilities and Commitments" (combined table is OK)
    - "Legal Proceedings"  
    - "Litigation"
    
-2. REJECT if the table appears under sections titled:
-   - "Guarantees"
-   - "Bank Guarantees" 
-   - "Performance Guarantees"
-   - "Letters of Credit"
-   - "Commitments"
+2. REJECT if the table appears under sections titled ONLY:
+   - "Guarantees" (without contingent liabilities)
+   - "Bank Guarantees" (without contingent liabilities)
+   - "Performance Guarantees" (without contingent liabilities)
+   - "Letters of Credit" (without contingent liabilities)
+   - "Commitments" (without contingent liabilities)
 
 3. Look at the table content itself:
    - Does it contain legal disputes, court cases, tax disputes?
    - Does it show amounts "not acknowledged as debt"?
    - Does it list uncertain future obligations?
 
-IMPORTANT: Use the document context to understand which section this table belongs to.
+IMPORTANT: 
+- Combined tables like "Contingent Liabilities and Commitments" should be ACCEPTED
+- Pure "Commitments" or "Guarantees" tables (without contingent liabilities) should be REJECTED
 
 Respond ONLY with 'True' or 'False':
-- True: If this table is specifically about contingent liabilities
-- False: If this table is about guarantees, commitments, or other items
+- True: If this table contains contingent liabilities (even if combined with commitments)
+- False: If this table is ONLY about guarantees/commitments without contingent liabilities
 
 Output: True or False
 """
-    
     response = llama_client(prompt)
     return response.strip()
 
-def extract_currency_and_unit_for_table(table_df, full_markdown: str) -> dict:
-    """
-    Extract both currency and unit for a table using hybrid approach.
-    Returns dict like {"currency": "INR", "unit": "Crores"} or {"currency": "Unknown", "unit": "Unknown"}
-    """
+def fix_merged_columns(df):
+    if df.empty or len(df.columns) < 2:
+        return df
     
+    df_fixed = df.copy()
+    number_pattern = r'[\d,]+\.?\d*'
+    
+    for i in range(len(df_fixed)):
+        first_cell = str(df_fixed.iloc[i, 0]).strip().lower()
+        if 'particular' in first_cell or 'total' in first_cell:
+            continue
+        
+        col1 = str(df_fixed.iloc[i, 0])
+        col2 = str(df_fixed.iloc[i, 1]) if len(df_fixed.columns) > 1 else ''
+        col3 = str(df_fixed.iloc[i, 2]) if len(df_fixed.columns) > 2 else ''
+        
+        numbers_in_col1 = re.findall(number_pattern, col1)
+        numbers_in_col1 = [n for n in numbers_in_col1 if len(n.replace(',', '').replace('.', '')) >= 2]
+        
+        if numbers_in_col1:
+            clean_text = col1
+            for num in numbers_in_col1:
+                clean_text = clean_text.replace(num, '')
+            clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+            
+            if not col2 or not any(c.isdigit() for c in col2):
+                col2 = numbers_in_col1[0] if len(numbers_in_col1) > 0 else col2
+            if len(numbers_in_col1) > 1 and (not col3 or not any(c.isdigit() for c in col3)):
+                col3 = numbers_in_col1[1]
+            
+            col1 = clean_text
+        
+        if col2 and len(col2) > 3:
+            has_letters = any(c.isalpha() for c in col2)
+            has_digits = any(c.isdigit() for c in col2)
+            
+            if has_letters and has_digits:
+                numbers_in_col2 = re.findall(number_pattern, col2)
+                numbers_in_col2 = [n for n in numbers_in_col2 if len(n.replace(',', '').replace('.', '')) >= 2]
+                
+                if numbers_in_col2:
+                    text_part = col2
+                    for num in numbers_in_col2:
+                        text_part = text_part.replace(num, '')
+                    text_part = re.sub(r'\s+', ' ', text_part).strip()
+                    
+                    if col1.strip() and not col1.strip().endswith('.'):
+                        col1 = col1.strip() + ' ' + text_part
+                    else:
+                        col1 = col1.strip() + text_part
+                    
+                    col2 = numbers_in_col2[0]
+                    
+                    if len(numbers_in_col2) > 1 and (not col3 or not any(c.isdigit() for c in col3)):
+                        col3 = numbers_in_col2[1]
+        
+        if col3 and len(col3) > 3:
+            has_letters = any(c.isalpha() for c in col3)
+            has_digits = any(c.isdigit() for c in col3)
+            
+            if has_letters and has_digits:
+                numbers_in_col3 = re.findall(number_pattern, col3)
+                numbers_in_col3 = [n for n in numbers_in_col3 if len(n.replace(',', '').replace('.', '')) >= 2]
+                
+                if numbers_in_col3:
+                    text_part = col3
+                    for num in numbers_in_col3:
+                        text_part = text_part.replace(num, '')
+                    text_part = re.sub(r'\s+', ' ', text_part).strip()
+                    
+                    if col1.strip() and not col1.strip().endswith('.'):
+                        col1 = col1.strip() + ' ' + text_part
+                    else:
+                        col1 = col1.strip() + text_part
+                    
+                    col3 = numbers_in_col3[0]
+        
+        df_fixed.iloc[i, 0] = col1
+        if len(df_fixed.columns) > 1:
+            df_fixed.iloc[i, 1] = col2
+        if len(df_fixed.columns) > 2:
+            df_fixed.iloc[i, 2] = col3
+    
+    return df_fixed
+
+def extract_currency_and_unit_for_table(table_df, full_markdown: str) -> dict:
     result = {"currency": "Unknown", "unit": "Unknown"}
     
-    # ===== STEP 1: Check column headers (highest priority) =====
     for col in table_df.columns:
         col_str = str(col).lower()
         
-        # Check for currency in headers
         if 'inr' in col_str or '₹' in col_str or 'rupee' in col_str or 'rs.' in col_str or 'rs ' in col_str:
             result["currency"] = "INR"
         elif 'usd' in col_str or '$' in col_str or 'dollar' in col_str:
@@ -212,7 +283,6 @@ def extract_currency_and_unit_for_table(table_df, full_markdown: str) -> dict:
         elif 'jpy' in col_str or '¥' in col_str or 'yen' in col_str:
             result["currency"] = "JPY"
         
-        # Check for unit in headers
         if 'crore' in col_str or 'cr.' in col_str or 'cr ' in col_str:
             result["unit"] = "Crores"
         elif 'lakh' in col_str or 'lac' in col_str:
@@ -226,7 +296,6 @@ def extract_currency_and_unit_for_table(table_df, full_markdown: str) -> dict:
         elif 'trillion' in col_str or 'tn' in col_str:
             result["unit"] = "Trillions"
     
-    # ===== STEP 2: Get text around table (look for patterns) =====
     if len(table_df) > 0 and len(table_df.columns) > 0:
         first_cell = str(table_df.iloc[0, 0])[:50]
         
@@ -236,7 +305,6 @@ def extract_currency_and_unit_for_table(table_df, full_markdown: str) -> dict:
             context_after = full_markdown[pos:min(len(full_markdown), pos+200)]
             context = context_before + context_after
             
-            # Currency patterns
             currency_patterns = [
                 (r'(?:in|of)?\s*(?:Rs\.?|INR|₹)\s', 'INR'),
                 (r'(?:in|of)?\s*(?:USD|\$|US\$)\s', 'USD'),
@@ -247,7 +315,6 @@ def extract_currency_and_unit_for_table(table_df, full_markdown: str) -> dict:
                 (r'US\s+Dollars?', 'USD'),
             ]
             
-            # Unit patterns
             unit_patterns = [
                 (r'\(.*?in.*?(?:Rs\.?|INR|₹)\s*Crores?\)', 'Crores'),
                 (r'\(.*?in.*?(?:Rs\.?|INR|₹)\s*Lakhs?\)', 'Lakhs'),
@@ -277,7 +344,6 @@ def extract_currency_and_unit_for_table(table_df, full_markdown: str) -> dict:
                         result["unit"] = unit
                         break
     
-    # ===== STEP 3: Check page header =====
     header = full_markdown[:1000]
     
     if result["currency"] == "Unknown":
@@ -296,7 +362,6 @@ def extract_currency_and_unit_for_table(table_df, full_markdown: str) -> dict:
         elif re.search(r'All.*?amount.*?in.*?Billions?', header, re.IGNORECASE):
             result["unit"] = "Billions"
     
-    # ===== STEP 4: If still not found, ask LLM =====
     if result["currency"] == "Unknown" or result["unit"] == "Unknown":
         prompt = f"""You are a financial document analyzer. Extract the CURRENCY and UNIT from this table.
 
@@ -308,34 +373,13 @@ TABLE (first 3 rows):
 
 TASK:
 1. Identify the CURRENCY used (e.g., INR, USD, EUR, GBP, JPY, etc.)
-   - Look for symbols: ₹, $, €, £, ¥
-   - Look for codes: INR, USD, EUR, GBP, JPY
-   - Look for words: Rupees, Dollars, Euros, Pounds, Yen
-   - Common in Indian reports: INR/Rs./Rupees
-
 2. Identify the UNIT/SCALE of amounts (e.g., Crores, Lakhs, Millions, Billions, Thousands, etc.)
-   - In India: Crores (10^7), Lakhs (10^5)
-   - International: Millions (10^6), Billions (10^9), Thousands (10^3), Trillions (10^12)
-   - Look in: table headers, column names, surrounding text, parentheses
-
-IMPORTANT RULES:
-- Return ONLY valid JSON format
-- If you cannot find currency, return "Unknown"
-- If you cannot find unit, return "Unknown"
-- Be precise - don't guess
-- Check table headers, column names, and surrounding context carefully
 
 Return ONLY this JSON format (no extra text):
 {{
   "currency": "INR",
   "unit": "Crores"
 }}
-
-Examples of valid responses:
-{{"currency": "USD", "unit": "Millions"}}
-{{"currency": "INR", "unit": "Lakhs"}}
-{{"currency": "EUR", "unit": "Billions"}}
-{{"currency": "Unknown", "unit": "Thousands"}}
 
 Your response:"""
         
@@ -348,112 +392,192 @@ Your response:"""
                     result["currency"] = llm_result["currency"]
                 if result["unit"] == "Unknown" and "unit" in llm_result:
                     result["unit"] = llm_result["unit"]
-        except Exception as e:
-            print(f"Warning: LLM extraction failed: {e}")
+        except:
+            pass
     
     return result
 
 def add_total_to_table(df, sheet_name):
-    """Convert last column to integer and add total row if not present."""
     try:
         if df.empty or len(df.columns) == 0:
-            print(f"  ⚠ Skipping totals for {sheet_name}: Empty dataframe")
             return df
         
-        # Get the last column
         last_col_name = df.columns[-1]
         
-        # Check if total row already exists (check first column for 'total')
         has_total = False
         if len(df) > 0 and len(df.columns) > 0:
             has_total = any('total' in str(val).lower() for val in df.iloc[:, 0])
         
         if has_total:
-            print(f"  ℹ Total row already exists in {sheet_name}")
             return df
         
-        # Convert last column to numeric, handling various formats
         df[last_col_name] = df[last_col_name].astype(str).str.replace(',', '')
         df[last_col_name] = df[last_col_name].str.replace('₹', '')
         df[last_col_name] = df[last_col_name].str.replace('$', '')
         df[last_col_name] = df[last_col_name].str.strip()
         
-        # Convert to numeric (coerce errors to NaN)
         df[last_col_name] = pd.to_numeric(df[last_col_name], errors='coerce')
         
-        # Calculate sum (excluding NaN values)
         total_value = df[last_col_name].sum()
         
-        # Create total row
         total_row = pd.DataFrame([['Total'] + [''] * (len(df.columns) - 2) + [total_value]], 
                                  columns=df.columns)
         
-        # Append total row
         df = pd.concat([df, total_row], ignore_index=True)
-        
-        print(f"  ✓ Added total row to {sheet_name}: {total_value:,.2f}")
         
         return df
         
-    except Exception as e:
-        print(f"  ⚠ Error adding total to {sheet_name}: {e}")
+    except:
         return df
 
 def clean_illegal_chars(df):
-    """Remove illegal characters from dataframe"""
     return df.applymap(
         lambda x: ILLEGAL_CHARACTERS_RE.sub("", str(x)) if isinstance(x, str) else x
     )
 
 def get_docling_pipeline():
-    """Get docling pipeline."""
     try:
-        print("Step 1: Creating pipeline options....")
         pipeline_options = PdfPipelineOptions(
             do_table_structure=True,
             table_structure_options=dict(do_cell_matching=True, mode=TableFormerMode.ACCURATE)
         )
-        print("Step 2: Creating document converter...")
         doc_converter = DocumentConverter(
             format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)}
         )
-        print("Step 3: Setting debug flag...")
         settings.debug.profile_pipeline_timings = True
         return doc_converter
-    
-    except Exception as e:
-        print(f"Exception occurred while getting the docling pipeline: {e}")
+    except:
         return None
 
 doc_converter_global = get_docling_pipeline()
 
 def get_docling_results(INPUT_PDF_SOURCE):
-    """Get docling results for PDF"""
-    if doc_converter_global is None:
-        raise RuntimeError("Docling converter not initialized.")
-    
     result = doc_converter_global.convert(INPUT_PDF_SOURCE)
     return result
 
+def extract_contents_pages(pdf_path, max_pages=15):
+    pages, _ = load_pdf_pages(pdf_path)
+    contents_pages = []
+    
+    for page in pages[:max_pages]:
+        text = page['text'].lower()
+        
+        if any(keyword in text for keyword in ['contents', 'index', 'table of contents']):
+            if 'financial statement' in text or 'consolidated' in text or 'standalone' in text:
+                contents_pages.append({
+                    'page_num': page['page_num'],
+                    'text': page['text']
+                })
+    
+    return contents_pages
+
+def parse_contents_with_llm(contents_pages):
+    if not contents_pages:
+        return None
+    
+    combined_text = "\n\n".join([p['text'] for p in contents_pages])
+    
+    prompt = f"""You are analyzing a Table of Contents from an annual report PDF.
+
+YOUR TASK: Extract the page number ranges for:
+1. Consolidated Financial Statements
+2. Standalone Financial Statements
+
+CONTENTS PAGE TEXT:
+{combined_text}
+
+INSTRUCTIONS:
+- Look for entries mentioning financial statements. Page numbers can appear BEFORE or AFTER the text:
+  
+  FORMAT 1 - Page number BEFORE text:
+  * "290 standalone financial statements of PTC India limited"
+  * "362 consolidated financial statements of PTC India limited"
+  
+  FORMAT 2 - Page number AFTER text:
+  * "Consolidated Financial Statements  75-131"
+  * "Standalone Financial Statements  132-220"
+
+- If you find ONLY single page numbers (not ranges):
+  * Use that page as START
+  * Estimate END by adding 50-70 pages
+
+- Keywords to look for:
+  * Consolidated: "consolidated financial statements"
+  * Standalone: "standalone financial statements", "separate financial statements"
+
+Return ONLY this JSON format:
+{{
+  "consolidated": {{"start": 362, "end": 430}},
+  "standalone": {{"start": 290, "end": 361}}
+}}
+
+Your JSON response:"""
+    
+    try:
+        response = llama_client(prompt).strip()
+        result = parse_llama_json_response(response)
+        
+        if isinstance(result, dict):
+            if 'consolidated' in result and 'standalone' in result:
+                return result
+        
+        return None
+        
+    except:
+        return None
+
+def refine_page_ranges(page_ranges):
+    if not page_ranges:
+        return page_ranges
+    
+    cons = page_ranges.get('consolidated', {})
+    stand = page_ranges.get('standalone', {})
+    
+    cons_start = cons.get('start')
+    stand_start = stand.get('start')
+    
+    if cons_start and stand_start:
+        if stand_start < cons_start:
+            if stand.get('end') and stand['end'] >= cons_start:
+                page_ranges['standalone']['end'] = cons_start - 1
+        elif cons_start < stand_start:
+            if cons.get('end') and cons['end'] >= stand_start:
+                page_ranges['consolidated']['end'] = stand_start - 1
+    
+    return page_ranges
+
+def determine_statement_type(page_num, page_ranges):
+    if not page_ranges:
+        return "Unknown"
+    
+    actual_page = page_num + 1
+    
+    cons = page_ranges.get('consolidated', {})
+    stand = page_ranges.get('standalone', {})
+    
+    if cons.get('start') and cons.get('end'):
+        if cons['start'] <= actual_page <= cons['end']:
+            return "Consolidated"
+    
+    if stand.get('start') and stand.get('end'):
+        if stand['start'] <= actual_page <= stand['end']:
+            return "Standalone"
+    
+    return "Unknown"
+
 def extract_cg(pdf_path):
-    """Main function to extract Contingent Liabilities from a PDF using Llama."""
     pages, pdf_document = load_pdf_pages(pdf_path)
     candidates = keyword_prefilter(pages)
-
-    print(f"[INFO] Prefiltered {len(candidates)} pages containing relevant keywords.")
 
     relevant_pages = []
 
     for p in candidates:
         stage1_result = stage_1_classify(p['text'])
-        print(f"[DEBUG] Stage 1 - Page {p['page_num'] + 1}: {stage1_result}")
 
         if isinstance(stage1_result, dict) and stage1_result.get("relevance") == "Relevant":
             confidence = stage1_result.get("confidence", 0)
             if confidence >= 0.85:
-                print("Inside Stage 2")
                 stage2_result = stage_2_classify(p['text'])
-                print(f"[DEBUG] Stage 2 - Page {p['page_num'] + 1}: {stage2_result}")
 
                 if isinstance(stage2_result, dict) and stage2_result.get("relevance") == "Relevant":
                     relevant_pages.append(p['page_num'])
@@ -469,17 +593,10 @@ def extract_cg(pdf_path):
         pdf.close()
 
         return relevant_pages
-    else:
-        print("No relevant pages found.")
-        return None
+    
+    return None
 
-def create_table_with_full_features(OUTPUT_PDF_PATH):
-    """
-    Extract and save tables with:
-    1. Context-aware classification
-    2. Currency and unit extraction
-    3. Total row calculation
-    """
+def create_table_with_full_features(OUTPUT_PDF_PATH, page_ranges=None):
     pdf_name = os.path.splitext(os.path.basename(OUTPUT_PDF_PATH))[0]
     output_folder = f"{pdf_name}_tables"
     os.makedirs(output_folder, exist_ok=True)
@@ -487,15 +604,13 @@ def create_table_with_full_features(OUTPUT_PDF_PATH):
     result = get_docling_results(OUTPUT_PDF_PATH)
     full_markdown = result.document.export_to_markdown()
     
-    print("\n" + "="*60)
-    print("EXTRACTING TABLES WITH FULL FEATURES")
-    print("="*60)
-    
     previous_page_num = None
     current_page_table_count = 0
     
     for table_ix, table in enumerate(result.document.tables):
         current_page_num = table.dict()['prov'][0]['page_no']
+
+        statement_type = determine_statement_type(current_page_num, page_ranges)
 
         if previous_page_num is None:
             previous_page_num = current_page_num
@@ -511,59 +626,44 @@ def create_table_with_full_features(OUTPUT_PDF_PATH):
         table_df.columns = [ILLEGAL_CHARACTERS_RE.sub("", str(col)) for col in table_df.columns]
         table_df = clean_illegal_chars(table_df)
 
-        # Use context-aware classification
         classification_result = classifyTable_with_context_check(
             table_df.to_markdown(), 
             table_ix, 
             full_markdown
         )
-        
-        print(f"\nClassification result for {sheet_name}: {classification_result}")
 
         if "true" in classification_result.lower():
-            # Extract currency and unit
+            table_df = fix_merged_columns(table_df)
             currency_unit = extract_currency_and_unit_for_table(table_df, full_markdown)
-            print(f"  Currency: {currency_unit['currency']}, Unit: {currency_unit['unit']}")
-            
-            # Add total to the table
             table_df = add_total_to_table(table_df, sheet_name)
             
-            # Add currency and unit as columns
             table_df['Currency'] = currency_unit['currency']
             table_df['Unit'] = currency_unit['unit']
+            table_df['Statement_Type'] = statement_type
+            table_df['Page_Number'] = current_page_num + 1
             
-            # Save to folder with currency and unit in filename
-            filename = f"{sheet_name}_{currency_unit['currency']}_{currency_unit['unit']}.xlsx"
+            filename = f"{sheet_name}_{statement_type}_{currency_unit['currency']}_{currency_unit['unit']}.xlsx"
             filepath = os.path.join(output_folder, filename)
             table_df.to_excel(filepath, index=False)
-            
-            print(f"  ✓ Saved: {filepath}")
         
         previous_page_num = current_page_num
 
 if __name__ == "__main__":
-    print("="*60)
-    print("CONTINGENT LIABILITIES EXTRACTION - FULL FEATURED VERSION")
-    print("="*60)
-    
-    start_time=time.time()
+    start_time = time.time()
 
-    # Step 1: Extract relevant pages
-    print("\n[STEP 1] Extracting relevant pages...")
+    contents_pages = extract_contents_pages(PDF_PATH)
+    page_ranges = None
+    
+    if contents_pages:
+        page_ranges = parse_contents_with_llm(contents_pages)
+        if page_ranges:
+            page_ranges = refine_page_ranges(page_ranges)
+
     relevant_pages = extract_cg(PDF_PATH)
     
     if relevant_pages:
-        print(f"\n✓ Found {len(relevant_pages)} relevant page(s): {relevant_pages}")
-        
-        # Step 2: Extract tables with all features
-        print("\n[STEP 2] Processing tables with full features...")
-        create_table_with_full_features(OUTPUT_PDF_PATH)
+        create_table_with_full_features(OUTPUT_PDF_PATH, page_ranges)
         
         end_time = time.time()
-        total_time= end_time-start_time
-        print("\n" + "="*60)
-        print("✅ PROCESSING COMPLETED SUCCESSFULLY!")
-        print(f"Total time :{total_time:.2f} seconds")
-        print("="*60)
-    else:
-        print("\n❌ No contingent liability tables found.")
+        total_time = end_time - start_time
+        print(f"\n✅ Processing completed in {total_time:.2f} seconds")
