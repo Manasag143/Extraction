@@ -549,8 +549,6 @@ Your JSON response:"""
     
     try:
         response = llama_client(prompt).strip()
-        print(f"\n[LLM Response]: {response}")
-        
         result = parse_llama_json_response(response)
         
         if isinstance(result, dict) and 'consolidated' in result and 'standalone' in result:
@@ -558,24 +556,15 @@ Your JSON response:"""
             stand = result.get('standalone', {})
             
             if (cons.get('start') or stand.get('start')):
-                print(f"\n[Success] LLM extracted:")
-                print(f"  Consolidated: {cons}")
-                print(f"  Standalone: {stand}")
                 return result
         
-        print("[Warning] LLM response invalid, trying regex fallback...")
-        
-    except Exception as e:
-        print(f"[Error] LLM parsing failed: {e}, trying regex fallback...")
+    except:
+        pass
     
     regex_result = extract_nested_page_numbers(combined_text)
     if regex_result:
-        print(f"\n[Success] Regex extracted:")
-        print(f"  Consolidated: {regex_result.get('consolidated')}")
-        print(f"  Standalone: {regex_result.get('standalone')}")
         return regex_result
     
-    print("[Error] Both LLM and regex failed to extract page numbers")
     return None
 
 def refine_page_ranges(page_ranges):
@@ -598,31 +587,11 @@ def refine_page_ranges(page_ranges):
     
     return page_ranges
 
-def determine_statement_type(page_num, page_ranges):
-    if not page_ranges:
-        return "Unknown"
-    
-    actual_page = page_num + 1
-    
-    cons = page_ranges.get('consolidated', {})
-    stand = page_ranges.get('standalone', {})
-    
-    if cons.get('start') and cons.get('end'):
-        if cons['start'] <= actual_page <= cons['end']:
-            return "Consolidated"
-    
-    if stand.get('start') and stand.get('end'):
-        if stand['start'] <= actual_page <= stand['end']:
-            return "Standalone"
-    
-    return "Unknown"
-
-def extract_cg(pdf_path, page_ranges=None):
+def extract_cg(pdf_path):
     pages, pdf_document = load_pdf_pages(pdf_path)
     candidates = keyword_prefilter(pages)
 
     relevant_pages = []
-    page_statement_map = {}
 
     for p in candidates:
         stage1_result = stage_1_classify(p['text'])
@@ -634,9 +603,6 @@ def extract_cg(pdf_path, page_ranges=None):
 
                 if isinstance(stage2_result, dict) and stage2_result.get("relevance") == "Relevant":
                     relevant_pages.append(p['page_num'])
-                    
-                    statement_type = determine_statement_type(p['page_num'], page_ranges)
-                    page_statement_map[p['page_num']] = statement_type
 
     if relevant_pages:
         pdf = fitz.open(pdf_path)
@@ -648,11 +614,75 @@ def extract_cg(pdf_path, page_ranges=None):
         new_pdf.close()
         pdf.close()
 
-        return relevant_pages, page_statement_map
+        return relevant_pages
     
-    return None, None
+    return None
 
-def create_table_with_full_features(OUTPUT_PDF_PATH, relevant_pages, page_statement_map):
+def extract_printed_page_number_from_page(page_text):
+    prompt = f"""You are analyzing a PDF page to find its printed page number.
+
+PAGE TEXT (first 1000 characters):
+{page_text[:1000]}
+
+TASK: Find the page number printed on this page.
+
+INSTRUCTIONS:
+- Look for numbers at the top, bottom, or corners of the page
+- Common formats: "440", "Page 440", "-440-", "440 |"
+- Ignore other numbers (amounts, dates, reference numbers)
+- The page number is usually small, standalone, and at edges
+
+IMPORTANT:
+- If you find the page number, return ONLY the number as an integer
+- If you cannot find a page number, return "None"
+- Do not return any explanation, just the number or "None"
+
+Your answer (just the number or "None"):"""
+    
+    response = llama_client(prompt).strip()
+    
+    try:
+        cleaned = response.replace("Page", "").replace("page", "").strip()
+        numbers = re.findall(r'\d+', cleaned)
+        if numbers:
+            page_num = int(numbers[0])
+            return page_num
+    except:
+        pass
+    
+    return None
+
+def map_extracted_pages_to_statement_types(OUTPUT_PDF_PATH, page_ranges):
+    pages, _ = load_pdf_pages(OUTPUT_PDF_PATH)
+    page_type_map = {}
+    
+    for page in pages:
+        page_idx = page['page_num']
+        page_text = page['text']
+        
+        printed_page_num = extract_printed_page_number_from_page(page_text)
+        
+        if printed_page_num:
+            cons = page_ranges.get('consolidated', {})
+            stand = page_ranges.get('standalone', {})
+            
+            statement_type = "Unknown"
+            
+            if cons.get('start') and cons.get('end'):
+                if cons['start'] <= printed_page_num <= cons['end']:
+                    statement_type = "Consolidated"
+            
+            if stand.get('start') and stand.get('end'):
+                if stand['start'] <= printed_page_num <= stand['end']:
+                    statement_type = "Standalone"
+            
+            page_type_map[page_idx] = statement_type
+        else:
+            page_type_map[page_idx] = "Unknown"
+    
+    return page_type_map
+
+def create_table_with_full_features(OUTPUT_PDF_PATH, page_type_map):
     pdf_name = os.path.splitext(os.path.basename(OUTPUT_PDF_PATH))[0]
     output_folder = f"{pdf_name}_tables"
     os.makedirs(output_folder, exist_ok=True)
@@ -660,26 +690,14 @@ def create_table_with_full_features(OUTPUT_PDF_PATH, relevant_pages, page_statem
     result = get_docling_results(OUTPUT_PDF_PATH)
     full_markdown = result.document.export_to_markdown()
     
-    # Create mapping: extracted_page_index -> original_page_num
-    extracted_to_original = {}
-    for idx, orig_page in enumerate(relevant_pages):
-        extracted_to_original[idx] = orig_page
-    
     previous_page_num = None
     current_page_table_count = 0
     
     for table_ix, table in enumerate(result.document.tables):
-        # FIXED: Docling uses 1-indexed, convert to 0-indexed
         docling_page_num = table.dict()['prov'][0]['page_no']
-        current_page_num = docling_page_num - 1  # Convert 1-indexed to 0-indexed
+        current_page_num = docling_page_num - 1
         
-        # Map extracted page to original page
-        original_page_num = extracted_to_original.get(current_page_num)
-        
-        if original_page_num is not None:
-            statement_type = page_statement_map.get(original_page_num, "Unknown")
-        else:
-            statement_type = "Unknown"
+        statement_type = page_type_map.get(current_page_num, "Unknown")
 
         if previous_page_num is None:
             previous_page_num = current_page_num
@@ -713,53 +731,57 @@ def create_table_with_full_features(OUTPUT_PDF_PATH, relevant_pages, page_statem
             filepath = os.path.join(output_folder, filename)
             table_df.to_excel(filepath, index=False)
             
-            print(f"✓ Saved: {filename}")
+            print(f"  ✓ {filename}")
         
         previous_page_num = current_page_num
 
 if __name__ == "__main__":
     start_time = time.time()
+    
+    pdf_name = os.path.basename(PDF_PATH)
+    print(f"\n{'='*60}")
+    print(f"Processing: {pdf_name}")
+    print(f"{'='*60}")
 
-    print("\n" + "="*60)
-    print("STEP 1: Extracting Contents Page")
-    print("="*60)
+    print("\n[STEP 1] Extracting page ranges from contents")
     contents_pages = extract_contents_pages(PDF_PATH)
     
     page_ranges = None
     if contents_pages:
-        print(f"Found {len(contents_pages)} contents page(s)")
         page_ranges = parse_contents_with_llm(contents_pages)
         
         if page_ranges:
             page_ranges = refine_page_ranges(page_ranges)
-            print("\n✅ Page ranges identified successfully")
-            print(f"  Consolidated: {page_ranges.get('consolidated')}")
-            print(f"  Standalone: {page_ranges.get('standalone')}")
+            cons = page_ranges.get('consolidated', {})
+            stand = page_ranges.get('standalone', {})
+            print(f"  Consolidated: {cons.get('start')} - {cons.get('end')}")
+            print(f"  Standalone: {stand.get('start')} - {stand.get('end')}")
         else:
-            print("\n⚠️  Could not extract page ranges")
+            print("  ⚠️  Could not extract page ranges")
     else:
-        print("\n⚠️  No contents page found")
+        print("  ⚠️  No contents page found")
 
-    print("\n" + "="*60)
-    print("STEP 2: Extracting Contingent Liability Pages")
-    print("="*60)
-    relevant_pages, page_statement_map = extract_cg(PDF_PATH, page_ranges)
+    print("\n[STEP 2] Extracting contingent liability pages")
+    relevant_pages = extract_cg(PDF_PATH)
     
     if relevant_pages:
-        print(f"Found {len(relevant_pages)} relevant page(s): {relevant_pages}")
+        print(f"  Found {len(relevant_pages)} relevant pages")
         
-        print("\nPage to Statement Type Mapping:")
-        for page in relevant_pages:
-            statement_type = page_statement_map.get(page, "Unknown")
-            print(f"  Page {page + 1}: {statement_type}")
+        print("\n[STEP 3] Processing tables")
         
-        print("\n" + "="*60)
-        print("STEP 3: Processing Tables")
-        print("="*60)
-        create_table_with_full_features(OUTPUT_PDF_PATH, relevant_pages, page_statement_map)
+        if page_ranges:
+            page_type_map = map_extracted_pages_to_statement_types(OUTPUT_PDF_PATH, page_ranges)
+        else:
+            pages, _ = load_pdf_pages(OUTPUT_PDF_PATH)
+            page_type_map = {p['page_num']: "Unknown" for p in pages}
+        
+        create_table_with_full_features(OUTPUT_PDF_PATH, page_type_map)
         
         end_time = time.time()
         total_time = end_time - start_time
-        print(f"\n✅ Processing completed in {total_time:.2f} seconds")
+        
+        print(f"\n{'='*60}")
+        print(f"✅ Completed in {total_time:.2f} seconds")
+        print(f"{'='*60}\n")
     else:
-        print("\n❌ No relevant pages found")
+        print("  ❌ No relevant pages found\n")
