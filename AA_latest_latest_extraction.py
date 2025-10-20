@@ -665,26 +665,21 @@ def create_table_with_full_features(OUTPUT_PDF_PATH, relevant_pages, page_statem
     for idx, orig_page in enumerate(relevant_pages):
         extracted_to_original[idx] = orig_page
     
-    print(f"\n[DEBUG] Extracted to Original Page Mapping:")
-    for ext_idx, orig_page in extracted_to_original.items():
-        stmt_type = page_statement_map.get(orig_page, "Unknown")
-        print(f"  Extracted Page {ext_idx} → Original Page {orig_page} ({orig_page + 1}) → {stmt_type}")
-    
     previous_page_num = None
     current_page_table_count = 0
     
     for table_ix, table in enumerate(result.document.tables):
-        current_page_num = table.dict()['prov'][0]['page_no']
-
+        # FIXED: Docling uses 1-indexed, convert to 0-indexed
+        docling_page_num = table.dict()['prov'][0]['page_no']
+        current_page_num = docling_page_num - 1  # Convert 1-indexed to 0-indexed
+        
         # Map extracted page to original page
         original_page_num = extracted_to_original.get(current_page_num)
         
         if original_page_num is not None:
             statement_type = page_statement_map.get(original_page_num, "Unknown")
-            print(f"\n[DEBUG] Table {table_ix + 1}: Extracted Page {current_page_num} → Original Page {original_page_num} ({original_page_num + 1}) → {statement_type}")
         else:
             statement_type = "Unknown"
-            print(f"\n[DEBUG] Table {table_ix + 1}: Could not map extracted page {current_page_num}")
 
         if previous_page_num is None:
             previous_page_num = current_page_num
