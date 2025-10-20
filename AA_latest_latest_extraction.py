@@ -471,6 +471,35 @@ def extract_contents_pages(pdf_path, max_pages=15):
     
     return contents_pages
 
+def extract_nested_page_numbers(contents_text):
+    result = {"consolidated": {}, "standalone": {}}
+    
+    stand_pattern = r'(\d+)\s+(?:standalone|separate)\s+financial\s+statements?'
+    stand_match = re.search(stand_pattern, contents_text, re.IGNORECASE)
+    
+    cons_pattern = r'(\d+)\s+consolidated\s+financial\s+statements?'
+    cons_match = re.search(cons_pattern, contents_text, re.IGNORECASE)
+    
+    if stand_match:
+        stand_page = int(stand_match.group(1))
+        result['standalone']['start'] = stand_page
+        
+        if cons_match:
+            cons_page = int(cons_match.group(1))
+            if cons_page > stand_page:
+                result['standalone']['end'] = cons_page - 1
+            else:
+                result['standalone']['end'] = stand_page + 70
+        else:
+            result['standalone']['end'] = stand_page + 70
+    
+    if cons_match:
+        cons_page = int(cons_match.group(1))
+        result['consolidated']['start'] = cons_page
+        result['consolidated']['end'] = cons_page + 70
+    
+    return result if (result['consolidated'] or result['standalone']) else None
+
 def parse_contents_with_llm(contents_pages):
     if not contents_pages:
         return None
@@ -487,44 +516,67 @@ CONTENTS PAGE TEXT:
 {combined_text}
 
 INSTRUCTIONS:
-- Look for entries mentioning financial statements. Page numbers can appear BEFORE or AFTER the text:
+- Look for entries mentioning financial statements. They can appear in various formats:
   
-  FORMAT 1 - Page number BEFORE text:
+  FORMAT 1 - Nested/Indented structure:
+  * "439 Financial statements"
+  *     "440 Standalone Financial Statements"
+  *     "576 Consolidated Financial statements"
+  USE PAGE NUMBERS: 440 for Standalone, 576 for Consolidated (ignore parent 439)
+  
+  FORMAT 2 - Direct entries:
   * "290 standalone financial statements of PTC India limited"
   * "362 consolidated financial statements of PTC India limited"
   
-  FORMAT 2 - Page number AFTER text:
+  FORMAT 3 - Range format:
   * "Consolidated Financial Statements  75-131"
-  * "Standalone Financial Statements  132-220"
 
-- If you find ONLY single page numbers (not ranges):
-  * Use that page as START
-  * Estimate END by adding 50-70 pages
+- If single page numbers:
+  * Use as START
+  * For END: If next section exists, use (next_page - 1), else add 70 pages
 
-- Keywords to look for:
+- Keywords (case-insensitive):
   * Consolidated: "consolidated financial statements"
   * Standalone: "standalone financial statements", "separate financial statements"
 
-Return ONLY this JSON format:
+Return ONLY valid JSON:
 {{
-  "consolidated": {{"start": 362, "end": 430}},
-  "standalone": {{"start": 290, "end": 361}}
+  "consolidated": {{"start": 576, "end": 650}},
+  "standalone": {{"start": 440, "end": 575}}
 }}
 
 Your JSON response:"""
     
     try:
         response = llama_client(prompt).strip()
+        print(f"\n[LLM Response]: {response}")
+        
         result = parse_llama_json_response(response)
         
-        if isinstance(result, dict):
-            if 'consolidated' in result and 'standalone' in result:
+        if isinstance(result, dict) and 'consolidated' in result and 'standalone' in result:
+            cons = result.get('consolidated', {})
+            stand = result.get('standalone', {})
+            
+            if (cons.get('start') or stand.get('start')):
+                print(f"\n[Success] LLM extracted:")
+                print(f"  Consolidated: {cons}")
+                print(f"  Standalone: {stand}")
                 return result
         
-        return None
+        print("[Warning] LLM response invalid, trying regex fallback...")
         
-    except:
-        return None
+    except Exception as e:
+        print(f"[Error] LLM parsing failed: {e}, trying regex fallback...")
+    
+    regex_result = extract_nested_page_numbers(combined_text)
+    if regex_result:
+        print(f"\n[Success] Regex extracted:")
+        print(f"  Consolidated: {regex_result.get('consolidated')}")
+        print(f"  Standalone: {regex_result.get('standalone')}")
+        return regex_result
+    
+    print("[Error] Both LLM and regex failed to extract page numbers")
+    return None
 
 def refine_page_ranges(page_ranges):
     if not page_ranges:
@@ -645,25 +697,47 @@ def create_table_with_full_features(OUTPUT_PDF_PATH, page_ranges=None):
             filename = f"{sheet_name}_{statement_type}_{currency_unit['currency']}_{currency_unit['unit']}.xlsx"
             filepath = os.path.join(output_folder, filename)
             table_df.to_excel(filepath, index=False)
+            
+            print(f"✓ Saved: {filename}")
         
         previous_page_num = current_page_num
 
 if __name__ == "__main__":
     start_time = time.time()
 
+    print("\n" + "="*60)
+    print("STEP 1: Extracting Contents Page")
+    print("="*60)
     contents_pages = extract_contents_pages(PDF_PATH)
-    page_ranges = None
     
+    page_ranges = None
     if contents_pages:
+        print(f"Found {len(contents_pages)} contents page(s)")
         page_ranges = parse_contents_with_llm(contents_pages)
+        
         if page_ranges:
             page_ranges = refine_page_ranges(page_ranges)
+            print("\n✅ Page ranges identified successfully")
+        else:
+            print("\n⚠️  Could not extract page ranges")
+    else:
+        print("\n⚠️  No contents page found")
 
+    print("\n" + "="*60)
+    print("STEP 2: Extracting Contingent Liability Pages")
+    print("="*60)
     relevant_pages = extract_cg(PDF_PATH)
     
     if relevant_pages:
+        print(f"Found {len(relevant_pages)} relevant page(s): {relevant_pages}")
+        
+        print("\n" + "="*60)
+        print("STEP 3: Processing Tables")
+        print("="*60)
         create_table_with_full_features(OUTPUT_PDF_PATH, page_ranges)
         
         end_time = time.time()
         total_time = end_time - start_time
         print(f"\n✅ Processing completed in {total_time:.2f} seconds")
+    else:
+        print("\n❌ No relevant pages found")
