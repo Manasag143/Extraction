@@ -508,7 +508,7 @@ def parse_contents_with_llm(contents_pages):
     
     prompt = f"""You are analyzing a Table of Contents from an annual report PDF.
 
-YOUR TASK: Extract the page number ranges for:
+YOUR TASK: Extract the PRINTED page number ranges for:
 1. Consolidated Financial Statements
 2. Standalone Financial Statements
 
@@ -539,6 +539,8 @@ INSTRUCTIONS:
   * Consolidated: "consolidated financial statements"
   * Standalone: "standalone financial statements", "separate financial statements"
 
+IMPORTANT: Return the PRINTED page numbers as they appear in the table of contents, NOT physical PDF page numbers.
+
 Return ONLY valid JSON:
 {{
   "consolidated": {{"start": 576, "end": 650}},
@@ -558,7 +560,7 @@ Your JSON response:"""
             stand = result.get('standalone', {})
             
             if (cons.get('start') or stand.get('start')):
-                print(f"\n[Success] LLM extracted:")
+                print(f"\n[Success] LLM extracted PRINTED page ranges:")
                 print(f"  Consolidated: {cons}")
                 print(f"  Standalone: {stand}")
                 return result
@@ -570,7 +572,7 @@ Your JSON response:"""
     
     regex_result = extract_nested_page_numbers(combined_text)
     if regex_result:
-        print(f"\n[Success] Regex extracted:")
+        print(f"\n[Success] Regex extracted PRINTED page ranges:")
         print(f"  Consolidated: {regex_result.get('consolidated')}")
         print(f"  Standalone: {regex_result.get('standalone')}")
         return regex_result
@@ -598,31 +600,95 @@ def refine_page_ranges(page_ranges):
     
     return page_ranges
 
-def determine_statement_type(page_num, page_ranges):
+def extract_printed_page_number(page_text, pdf_page_num):
+    """
+    Use LLM to extract the actual printed page number from the page text.
+    """
+    prompt = f"""You are analyzing a page from an annual report PDF.
+
+TASK: Find the PRINTED PAGE NUMBER on this page.
+
+PAGE TEXT (first 1500 characters):
+{page_text[:1500]}
+
+INSTRUCTIONS:
+- Look for page numbers typically at: top/bottom corners, headers, footers
+- Common formats: "Page 123", "123", "- 123 -", "p.123", "| 123 |"
+- Ignore other numbers (amounts, years, sections, note numbers)
+- The page number is usually the smallest number in header/footer area
+- Look in the first 200 and last 200 characters of the text
+
+Return ONLY the numeric page number (e.g., "123" or "440"), nothing else.
+If no page number found, return "NOT_FOUND"
+
+Your response:"""
+    
+    try:
+        response = llama_client(prompt).strip()
+        match = re.search(r'\b(\d+)\b', response)
+        if match and response.lower() != "not_found":
+            return int(match.group(1))
+        return None
+    except:
+        return None
+
+def create_page_number_mapping(pdf_path, relevant_pages):
+    """
+    Create a mapping between physical PDF pages and printed page numbers.
+    Returns: {physical_page: printed_page_number}
+    """
+    pages, _ = load_pdf_pages(pdf_path)
+    mapping = {}
+    
+    print("\n" + "="*60)
+    print("Creating Page Number Mapping (Physical → Printed)")
+    print("="*60)
+    
+    for physical_page in relevant_pages:
+        page_text = pages[physical_page]['text']
+        printed_num = extract_printed_page_number(page_text, physical_page)
+        
+        if printed_num:
+            mapping[physical_page] = printed_num
+            print(f"Physical Page {physical_page:3d} → Printed Page {printed_num:3d}")
+        else:
+            mapping[physical_page] = physical_page + 1
+            print(f"Physical Page {physical_page:3d} → Printed Page {physical_page + 1:3d} (estimated)")
+    
+    return mapping
+
+def determine_statement_type_with_mapping(physical_page, page_number_mapping, page_ranges):
+    """
+    Use the printed page number to determine statement type.
+    """
     if not page_ranges:
         return "Unknown"
     
-    actual_page = page_num + 1
+    printed_page = page_number_mapping.get(physical_page)
+    if not printed_page:
+        return "Unknown"
     
     cons = page_ranges.get('consolidated', {})
     stand = page_ranges.get('standalone', {})
     
     if cons.get('start') and cons.get('end'):
-        if cons['start'] <= actual_page <= cons['end']:
+        if cons['start'] <= printed_page <= cons['end']:
             return "Consolidated"
     
     if stand.get('start') and stand.get('end'):
-        if stand['start'] <= actual_page <= stand['end']:
+        if stand['start'] <= printed_page <= stand['end']:
             return "Standalone"
     
     return "Unknown"
 
-def extract_cg(pdf_path, page_ranges=None):
+def extract_cg_with_page_mapping(pdf_path, page_ranges=None):
+    """
+    Modified version that creates and uses page number mapping.
+    """
     pages, pdf_document = load_pdf_pages(pdf_path)
     candidates = keyword_prefilter(pages)
 
     relevant_pages = []
-    page_statement_map = {}
 
     for p in candidates:
         stage1_result = stage_1_classify(p['text'])
@@ -634,9 +700,26 @@ def extract_cg(pdf_path, page_ranges=None):
 
                 if isinstance(stage2_result, dict) and stage2_result.get("relevance") == "Relevant":
                     relevant_pages.append(p['page_num'])
-                    
-                    statement_type = determine_statement_type(p['page_num'], page_ranges)
-                    page_statement_map[p['page_num']] = statement_type
+
+    if not relevant_pages:
+        return None, None, None
+
+    page_number_mapping = create_page_number_mapping(pdf_path, relevant_pages)
+    
+    page_statement_map = {}
+    print("\n" + "="*60)
+    print("Statement Type Classification")
+    print("="*60)
+    for physical_page in relevant_pages:
+        statement_type = determine_statement_type_with_mapping(
+            physical_page, 
+            page_number_mapping, 
+            page_ranges
+        )
+        page_statement_map[physical_page] = statement_type
+        
+        printed_page = page_number_mapping.get(physical_page, physical_page + 1)
+        print(f"Physical Page {physical_page:3d} (Printed: {printed_page:3d}) → {statement_type}")
 
     if relevant_pages:
         pdf = fitz.open(pdf_path)
@@ -648,11 +731,12 @@ def extract_cg(pdf_path, page_ranges=None):
         new_pdf.close()
         pdf.close()
 
-        return relevant_pages, page_statement_map
-    
-    return None, None
+    return relevant_pages, page_statement_map, page_number_mapping
 
-def create_table_with_full_features(OUTPUT_PDF_PATH, relevant_pages, page_statement_map):
+def create_table_with_full_features_v2(OUTPUT_PDF_PATH, relevant_pages, page_statement_map, page_number_mapping):
+    """
+    Updated version that uses page_number_mapping for accurate labeling.
+    """
     pdf_name = os.path.splitext(os.path.basename(OUTPUT_PDF_PATH))[0]
     output_folder = f"{pdf_name}_tables"
     os.makedirs(output_folder, exist_ok=True)
@@ -660,7 +744,6 @@ def create_table_with_full_features(OUTPUT_PDF_PATH, relevant_pages, page_statem
     result = get_docling_results(OUTPUT_PDF_PATH)
     full_markdown = result.document.export_to_markdown()
     
-    # Create mapping: extracted_page_index -> original_page_num
     extracted_to_original = {}
     for idx, orig_page in enumerate(relevant_pages):
         extracted_to_original[idx] = orig_page
@@ -669,17 +752,17 @@ def create_table_with_full_features(OUTPUT_PDF_PATH, relevant_pages, page_statem
     current_page_table_count = 0
     
     for table_ix, table in enumerate(result.document.tables):
-        # FIXED: Docling uses 1-indexed, convert to 0-indexed
         docling_page_num = table.dict()['prov'][0]['page_no']
-        current_page_num = docling_page_num - 1  # Convert 1-indexed to 0-indexed
+        current_page_num = docling_page_num - 1
         
-        # Map extracted page to original page
         original_page_num = extracted_to_original.get(current_page_num)
         
         if original_page_num is not None:
             statement_type = page_statement_map.get(original_page_num, "Unknown")
+            printed_page_num = page_number_mapping.get(original_page_num, original_page_num + 1)
         else:
             statement_type = "Unknown"
+            printed_page_num = current_page_num + 1
 
         if previous_page_num is None:
             previous_page_num = current_page_num
@@ -689,7 +772,7 @@ def create_table_with_full_features(OUTPUT_PDF_PATH, relevant_pages, page_statem
         else:
             current_page_table_count = 1
 
-        sheet_name = f"Page_no_{current_page_num}_table_{current_page_table_count}"
+        sheet_name = f"PrintedPage_{printed_page_num}_table_{current_page_table_count}"
 
         table_df: pd.DataFrame = table.export_to_dataframe()
         table_df.columns = [ILLEGAL_CHARACTERS_RE.sub("", str(col)) for col in table_df.columns]
@@ -708,6 +791,8 @@ def create_table_with_full_features(OUTPUT_PDF_PATH, relevant_pages, page_statem
             
             table_df['Currency'] = currency_unit['currency']
             table_df['Unit'] = currency_unit['unit']
+            table_df['Physical_PDF_Page'] = original_page_num
+            table_df['Printed_Page_Number'] = printed_page_num
             
             filename = f"{sheet_name}_{statement_type}_{currency_unit['currency']}_{currency_unit['unit']}.xlsx"
             filepath = os.path.join(output_folder, filename)
@@ -732,7 +817,7 @@ if __name__ == "__main__":
         
         if page_ranges:
             page_ranges = refine_page_ranges(page_ranges)
-            print("\n✅ Page ranges identified successfully")
+            print("\n✅ Page ranges identified (PRINTED page numbers)")
             print(f"  Consolidated: {page_ranges.get('consolidated')}")
             print(f"  Standalone: {page_ranges.get('standalone')}")
         else:
@@ -743,20 +828,22 @@ if __name__ == "__main__":
     print("\n" + "="*60)
     print("STEP 2: Extracting Contingent Liability Pages")
     print("="*60)
-    relevant_pages, page_statement_map = extract_cg(PDF_PATH, page_ranges)
+    relevant_pages, page_statement_map, page_number_mapping = extract_cg_with_page_mapping(
+        PDF_PATH, page_ranges
+    )
     
     if relevant_pages:
-        print(f"Found {len(relevant_pages)} relevant page(s): {relevant_pages}")
-        
-        print("\nPage to Statement Type Mapping:")
-        for page in relevant_pages:
-            statement_type = page_statement_map.get(page, "Unknown")
-            print(f"  Page {page + 1}: {statement_type}")
+        print(f"\nFound {len(relevant_pages)} relevant page(s)")
         
         print("\n" + "="*60)
         print("STEP 3: Processing Tables")
         print("="*60)
-        create_table_with_full_features(OUTPUT_PDF_PATH, relevant_pages, page_statement_map)
+        create_table_with_full_features_v2(
+            OUTPUT_PDF_PATH, 
+            relevant_pages, 
+            page_statement_map, 
+            page_number_mapping
+        )
         
         end_time = time.time()
         total_time = end_time - start_time
